@@ -10,9 +10,9 @@ Esta é a versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaç�
 |---|---|
 | Modelos meteorológicos | Seleção entre Best Match e os modelos globais disponíveis no notebook. |
 | Atualização de dados | Consulta à API de previsão com cache de 10 minutos e botão de atualização manual. |
-| Mapa | Marcadores dimensionados e coloridos conforme o escore de risco por unidade. |
-| Visão operacional | Indicadores por nível de risco e lista filtrável das unidades. |
-| Detalhamento | Métricas atuais e série de previsão de 24 horas para a unidade selecionada. |
+| Mapa | Marcadores dimensionados e coloridos conforme o escore de risco por unidade, com leitura breve no próprio mapa. |
+| Visão operacional | Barra lateral com modelo, estilo do mapa, centralização, pesquisa, legenda e lista clicável das 40 unidades. |
+| Detalhamento | Janela escura equivalente ao pop-up do notebook, com 24 leituras horárias de CAPE, Lifted Index, CIN, score e risco. |
 
 ## Estrutura do projeto
 
@@ -35,6 +35,10 @@ streamlit run app.py
 ```
 
 A aplicação estará disponível normalmente em `http://localhost:8501`.
+
+## Interação com as unidades
+
+Use a pesquisa ou clique em qualquer unidade da barra lateral. O mapa aproxima a localização e abre o detalhamento. A primeira linha da tabela representa a hora de referência atual; as demais linhas mostram as 23 horas seguintes, com cores coerentes com o nível de risco. Os marcadores do mapa também mantêm um pop-up resumido e acionam o mesmo fluxo de detalhe quando selecionados.
 
 ## Publicação no Streamlit Community Cloud
 
