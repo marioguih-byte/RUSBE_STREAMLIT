@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
-from modelos import MODELOS, ErroBuscaModelo, buscar_modelo
+from modelos import MODELOS, TZ_BRASILIA, ErroBuscaModelo, buscar_modelo, horario_local
 from risco_raio import NIVEIS_RISCO, calcular_risco
 from unidades import ESTACOES
 
@@ -110,7 +110,7 @@ def serie_da_estacao(nome: str, dados: dict[str, Any]) -> pd.DataFrame:
         cin = _valor_da_hora(cins, indice)
         score, nivel, cor = calcular_risco(cape, lifted_index, cin)
         try:
-            horario = datetime.fromisoformat(tempos[indice]).strftime("%H:%M (%d/%m)")
+            horario = horario_local(tempos[indice]).strftime("%H:%M (%d/%m)")
         except (ValueError, IndexError):
             horario = tempos[indice] if indice < len(tempos) else "—"
         if indice == inicio:
@@ -366,7 +366,7 @@ def main() -> None:
             "elevam o risco; CIN elevado reduz a probabilidade de disparo convectivo. O painel serve ao acompanhamento "
             "meteorológico e não substitui alertas oficiais ou sistemas de detecção de descargas atmosféricas."
         )
-        st.caption(f"Última renderização local: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}.")
+        st.caption(f"Última renderização local: {datetime.now(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S')} (America/Sao_Paulo).")
 
 
 if __name__ == "__main__":

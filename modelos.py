@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -12,6 +13,7 @@ from unidades import ESTACOES
 API_URL = "https://api.open-meteo.com/v1/forecast"
 TIMEOUT = 25
 VARIAVEIS_HOURLY = "cape,lifted_index,convective_inhibition"
+TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 
 MODELOS = {
     "best_match": ("Best Match (automático)", "—", "Automática"),
@@ -33,16 +35,24 @@ class ErroBuscaModelo(RuntimeError):
     """Erro tratado durante a obtenção de previsão de um modelo."""
 
 
+def horario_local(tempo: str) -> datetime:
+    """Interpreta a hora da API e a devolve explicitamente em America/Sao_Paulo."""
+    data_hora = datetime.fromisoformat(tempo)
+    if data_hora.tzinfo is None:
+        return data_hora.replace(tzinfo=TZ_BRASILIA)
+    return data_hora.astimezone(TZ_BRASILIA)
+
+
 def _indice_hora_atual(tempos: list[str]) -> int:
     """Localiza, na série horária, a previsão mais próxima do horário atual."""
     if not tempos:
         return 0
 
-    agora = datetime.now().astimezone()
+    agora = datetime.now(TZ_BRASILIA)
     alvos: list[datetime] = []
     for tempo in tempos:
         try:
-            alvos.append(datetime.fromisoformat(tempo).astimezone())
+            alvos.append(horario_local(tempo))
         except ValueError:
             alvos.append(agora)
     return min(range(len(alvos)), key=lambda indice: abs(alvos[indice] - agora))
@@ -126,7 +136,7 @@ def buscar_modelo(model_id: str, session: Optional[requests.Session] = None) -> 
 
         if hora_referencia == "—" and tempos:
             try:
-                hora_referencia = datetime.fromisoformat(tempos[indice]).strftime("%H:%M (%d/%m)")
+                hora_referencia = horario_local(tempos[indice]).strftime("%H:%M (%d/%m)")
             except (ValueError, IndexError):
                 hora_referencia = tempos[indice] if indice < len(tempos) else "—"
 
