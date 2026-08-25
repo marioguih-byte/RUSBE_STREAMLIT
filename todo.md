@@ -1,5 +1,6 @@
 # Tarefas da adaptação ao notebook
 
+- [x] Corrigir a referência horária que permanece em UTC na versão publicada, invalidando também a entrada de cache anterior.
 - [x] Converter a referência e a tabela horária explicitamente para America/Sao_Paulo.
 - [x] Comparar os controles, a seleção de unidade e a janela detalhada do notebook com a aplicação Streamlit entregue.
 - [x] Fazer o clique no marcador do mapa selecionar a unidade correspondente no estado da sessão.

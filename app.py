@@ -34,11 +34,12 @@ TILES = {
 CENTRO_AMERICA_SUL = [-20.0, -47.0]
 ZOOM_AMERICA_SUL = 4
 NIVEIS_COM_SEM_DADOS = [nivel for _, nivel, _ in NIVEIS_RISCO] + ["Sem dados"]
+CACHE_HORARIO_LOCAL = "america_sao_paulo_v2"
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def carregar_dados(modelo_id: str) -> dict[str, Any]:
-    """Mantém a previsão consultada por dez minutos."""
+def carregar_dados(modelo_id: str, versao_cache: str) -> dict[str, Any]:
+    """Mantém a previsão consultada por dez minutos, separada por versão temporal."""
     return buscar_modelo(modelo_id)
 
 
@@ -287,7 +288,7 @@ def main() -> None:
 
     try:
         with st.spinner(f"Buscando {nome_modelo} para {len(ESTACOES)} unidades..."):
-            dados = carregar_dados(modelo_id)
+            dados = carregar_dados(modelo_id, CACHE_HORARIO_LOCAL)
     except ErroBuscaModelo as erro:
         st.error(f"Falha ao buscar o modelo selecionado: {erro}")
         st.stop()
