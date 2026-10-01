@@ -8,7 +8,7 @@ pelo relatório.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from modelos import horario_local
-from risco_raio import PARAMETROS_PADRAO, ParametrosRisco, calcular_risco, classificar_risco
+from risco_raio import PARAMETROS_PADRAO, ParametrosRisco, calcular_risco, classificar_risco, detalhar_risco
 from unidades import ESTACOES, UFS
 
 JANELA_TENDENCIA_H = 6  # horas à frente usadas para decidir ▲ / ▼
@@ -73,12 +73,64 @@ def parametros_da_unidade(
     return replace(parametros, fator_cape=parametros.fator_cape * fator_cape, fator_li=parametros.fator_li * fator_li)
 
 
-def scores_relativos(serie: dict[str, Any], parametros: ParametrosRisco = PARAMETROS_PADRAO) -> list[Optional[float]]:
+@dataclass(frozen=True)
+class GatePrecipitacao:
+    """Exige chuva prevista para manter o score nas UFs listadas.
+
+    Em regiões onde CAPE/LI/CIN costumam ser "altos" sem haver tempestade (litoral tropical sob
+    inversão de alísios, por exemplo), o score só vale integralmente se o modelo também prevê
+    precipitação (>= ``limiar_mm_h``) em alguma hora entre a atual e ``janela_h`` horas à frente.
+    Caso contrário, o score é multiplicado por ``multiplicador``.
+    """
+
+    ufs: frozenset = frozenset()
+    limiar_mm_h: float = 0.1
+    janela_h: int = 3
+    multiplicador: float = 0.5
+
+
+def carregar_gate(caminho: Path = ARQUIVO_REGIOES) -> GatePrecipitacao:
+    """Lê a seção ``gate_precipitacao`` de ``config_regioes.json`` (sem a seção, o gate fica desligado)."""
+    try:
+        bruto = json.loads(Path(caminho).read_text(encoding="utf-8")).get("gate_precipitacao", {})
+        return GatePrecipitacao(
+            ufs=frozenset(uf for uf in bruto.get("ufs", []) if uf in UFS),
+            limiar_mm_h=float(bruto.get("limiar_mm_h", 0.1)),
+            janela_h=int(bruto.get("janela_h", 3)),
+            multiplicador=float(bruto.get("multiplicador", 0.5)),
+        )
+    except (OSError, ValueError, TypeError, AttributeError):
+        return GatePrecipitacao()
+
+
+def janela_frente(valores: list[Optional[float]], janela: int) -> list[Optional[float]]:
+    """Máximo de cada posição e das ``janela`` seguintes (ignora ``None``; ``None`` se não houver nenhum valor)."""
+    saida: list[Optional[float]] = []
+    for i in range(len(valores)):
+        trecho = [v for v in valores[i : i + janela + 1] if v is not None]
+        saida.append(max(trecho) if trecho else None)
+    return saida
+
+
+def multiplicador_do_gate(chuva_na_janela: Optional[float], uf: str, gate: Optional[GatePrecipitacao]) -> Optional[float]:
+    """Multiplicador a aplicar (ou ``None``). Sem dado de chuva, o gate NÃO é aplicado (evita esconder risco por falta de dado)."""
+    if gate is None or uf not in gate.ufs or chuva_na_janela is None:
+        return None
+    return gate.multiplicador if chuva_na_janela < gate.limiar_mm_h else None
+
+
+def scores_relativos(
+    serie: dict[str, Any],
+    parametros: ParametrosRisco = PARAMETROS_PADRAO,
+    uf: str = "",
+    gate: Optional[GatePrecipitacao] = None,
+) -> list[Optional[float]]:
     """Scores horários a partir da hora atual: posição 0 = agora, 1 = +1 h, …"""
     inicio = serie.get("idx_atual", 0)
     n = len(serie.get("tempos", []))
     capes, lis, cins = serie.get("cape", []), serie.get("li", []), serie.get("cin", [])
     usa_extras = parametros.peso_extras > 0
+    chuva = janela_frente(serie["precip"], gate.janela_h) if gate and uf in gate.ufs and "precip" in serie else None
     return [
         calcular_risco(
             _valor(capes, i),
@@ -86,9 +138,43 @@ def scores_relativos(serie: dict[str, Any], parametros: ParametrosRisco = PARAME
             _valor(cins, i),
             parametros,
             extras_na_hora(serie, i) if usa_extras else None,
+            multiplicador_do_gate(_valor(chuva, i) if chuva is not None else None, uf, gate),
         )[0]
         for i in range(inicio, n)
     ]
+
+
+def explicar_hora(
+    serie: dict[str, Any],
+    deslocamento: int,
+    uf: str,
+    parametros: ParametrosRisco = PARAMETROS_PADRAO,
+    regioes: Optional[dict[str, tuple[float, float]]] = None,
+    gate: Optional[GatePrecipitacao] = None,
+) -> dict[str, Any]:
+    """Como o score de uma hora foi formado (pontos por componente, ajuste regional e gate)."""
+    i = serie.get("idx_atual", 0) + deslocamento
+    p = parametros_da_unidade(parametros, uf, regioes)
+    chuva = None
+    if gate and uf in gate.ufs and "precip" in serie:
+        chuva = _valor(janela_frente(serie["precip"], gate.janela_h), i)
+    mult = multiplicador_do_gate(chuva, uf, gate)
+    detalhe = detalhar_risco(
+        _valor(serie.get("cape", []), i), _valor(serie.get("li", []), i), _valor(serie.get("cin", []), i),
+        p, extras_na_hora(serie, i) if p.peso_extras > 0 else None, mult,
+    )
+    return {
+        **detalhe,
+        "cin": _valor(serie.get("cin", []), i),
+        "gate_configurado": bool(gate and uf in gate.ufs),
+        "gate_sem_dado": bool(gate and uf in gate.ufs and chuva is None),
+        "gate_aplicado": mult is not None,
+        "chuva_janela": chuva,
+        "janela_h": gate.janela_h if gate else None,
+        "limiar": gate.limiar_mm_h if gate else None,
+        "fator_cape_regiao": (regioes or {}).get(uf, FATORES_NEUTROS)[0],
+        "fator_li_regiao": (regioes or {}).get(uf, FATORES_NEUTROS)[1],
+    }
 
 
 def horas_a_frente(dados: dict[str, Any]) -> int:
@@ -119,12 +205,16 @@ def series_por_unidade(
     dados: dict[str, Any],
     parametros: ParametrosRisco = PARAMETROS_PADRAO,
     regioes: Optional[dict[str, tuple[float, float]]] = None,
+    gate: Optional[GatePrecipitacao] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Série de score por unidade (``rel``: posição 0 = agora, 1 = +1 h, …), com ajuste por UF."""
+    """Série de score por unidade (``rel``: posição 0 = agora, 1 = +1 h, …), com ajuste por UF e gate de chuva."""
     return {
         estacao["nome"]: {
             "rel": scores_relativos(
-                dados.get(estacao["nome"], {}), parametros_da_unidade(parametros, estacao["uf"], regioes)
+                dados.get(estacao["nome"], {}),
+                parametros_da_unidade(parametros, estacao["uf"], regioes),
+                estacao["uf"],
+                gate,
             )
         }
         for estacao in ESTACOES

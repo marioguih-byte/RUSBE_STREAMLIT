@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import requests
 
-from analise import carregar_regioes, consolidar, rotulo_horario, series_por_unidade
+from analise import carregar_gate, carregar_regioes, consolidar, rotulo_horario, series_por_unidade
 from modelos import MODELOS, TZ_BRASILIA, buscar_modelo
 from risco_raio import ORDEM, ParametrosRisco
 
@@ -127,11 +127,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="não envia nada; só imprime e não grava o estado")
     args = ap.parse_args(argv)
 
-    dados = buscar_modelo(args.modelo, extras=args.heuristica_ampliada)
+    dados = buscar_modelo(args.modelo)  # inclui chuva prevista: necessária ao gate do Nordeste
     ampliada = args.heuristica_ampliada and dados.get("_extras", False)
+    if not dados.get("_extras", False):
+        print("Aviso: sem dados de precipitação; o ajuste do Nordeste (exigir chuva prevista) não foi aplicado.")
     if args.heuristica_ampliada and not ampliada:
         print("Aviso: variáveis extras indisponíveis; usando a heurística básica.")
-    series = series_por_unidade(dados, ParametrosRisco(peso_extras=1.0 if ampliada else 0.0), carregar_regioes())
+    series = series_por_unidade(dados, ParametrosRisco(peso_extras=1.0 if ampliada else 0.0), carregar_regioes(), carregar_gate())
     tabela = consolidar(dados, series, 0)
 
     anterior = json.loads(args.estado.read_text(encoding="utf-8")) if args.estado.exists() else {}

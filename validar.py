@@ -146,6 +146,40 @@ def testes_ampliados() -> None:
     sp = next(e["nome"] for e in ESTACOES if e["uf"] == "SP")
     assert forte[sp]["rel"] == neutro[sp]["rel"]  # UF sem ajuste não muda
 
+    # Sem energia (CAPE < 300): LI e baixa inibição não somam pontos altos (ar estável não vira "Moderado").
+    assert calcular_risco(200, -3, -10)[0] == 5.0 and calcular_risco(0, -8, 0)[0] == 5.0
+    assert calcular_risco(350, -3, -10)[0] == 10 + 22 + 20  # com energia, a regra é a original
+    assert calcular_risco(200, 1.0, -10)[0] == 5.0
+
+    # Gate de chuva (Nordeste): score reduzido só quando não há chuva prevista na janela; sem dado, não aplica.
+    from analise import carregar_gate, explicar_hora, janela_frente, multiplicador_do_gate
+
+    assert janela_frente([0, 0, 2, 0, 0, 0], 2) == [2, 2, 2, 0, 0, 0] and janela_frente([None, None], 1) == [None, None]
+    gate = carregar_gate()
+    assert {"CE", "RN", "PE", "SE", "BA"} <= set(gate.ufs) and "RJ" not in gate.ufs and gate.multiplicador == 0.5
+    assert multiplicador_do_gate(0.0, "CE", gate) == 0.5 and multiplicador_do_gate(0.5, "CE", gate) is None
+    assert multiplicador_do_gate(None, "CE", gate) is None and multiplicador_do_gate(0.0, "RJ", gate) is None
+    assert calcular_risco(1500, -3, -30, multiplicador_gate=0.5)[0] == 0.5 * (22 + 22 + 10)
+    seco = _dados_sinteticos()
+    for s in seco.values():
+        if isinstance(s, dict):
+            s["precip"] = [0.0] * len(s["tempos"])
+    chuvoso = {n: ({**s, "precip": [1.0] * len(s["tempos"])} if isinstance(s, dict) else s) for n, s in seco.items()}
+    ce = next(e["nome"] for e in ESTACOES if e["uf"] == "CE")
+    rj = next(e["nome"] for e in ESTACOES if e["uf"] == "RJ")
+    s_seco = series_por_unidade(seco, ParametrosRisco(), None, gate)
+    s_chuva = series_por_unidade(chuvoso, ParametrosRisco(), None, gate)
+    s_sem = series_por_unidade(seco, ParametrosRisco(), None, None)
+    assert s_seco[rj]["rel"] == s_sem[rj]["rel"]  # fora do Nordeste o gate não age
+    assert s_chuva[ce]["rel"] == s_sem[ce]["rel"]  # com chuva prevista, o score fica igual
+    k = 27
+    assert abs(s_seco[ce]["rel"][k] - 0.5 * s_sem[ce]["rel"][k]) <= 0.06  # sem chuva: metade
+    explic = explicar_hora(seco[ce], k, "CE", ParametrosRisco(), None, gate)
+    assert explic["gate_aplicado"] and abs(explic["score"] - s_seco[ce]["rel"][k]) < 1e-9
+    assert explic["pts_cape"] + explic["pts_li"] + explic["pts_cin"] == explic["subtotal"]
+    sem_dado = explicar_hora({k_: v for k_, v in seco[ce].items() if k_ != "precip"}, k, "CE", ParametrosRisco(), None, gate)
+    assert sem_dado["gate_sem_dado"] and not sem_dado["gate_aplicado"] and sem_dado["score"] == s_sem[ce]["rel"][k]
+
     # Consulta com extras: sucesso, erro 400 (não derruba o núcleo) e eixo de tempo diferente.
     ok = buscar_modelo("best_match", _ClienteFalso("ok"))
     assert ok["_extras"] is True and ok[ESTACOES[0]["nome"]]["precip"] == [1.0] * 6
@@ -178,6 +212,14 @@ def testes_ampliados() -> None:
         cabecalho = saida.read_text(encoding="utf-8-sig").splitlines()[0]
         assert cabecalho.startswith("modelo;execucao;unidade;valido;horas") and cabecalho.endswith("score")
         assert len(historico.evolucao_previsao(reduc, "best_match", "2026-08-26T00:00", caminho=banco)) == 2
+        # O score recalculado do histórico segue o mesmo gate de chuva do painel (usa as horas seguintes da execução).
+        banco2 = Path(pasta) / "g.sqlite"
+        seco_h = {n: ({**s, "precip": [0.0] * len(s["tempos"])} if isinstance(s, dict) else s) for n, s in _dados_sinteticos(60, 3).items()}
+        seco_h["_obtido_em"] = agora.isoformat()
+        assert historico.registrar(seco_h, "best_match", banco2)
+        ce_nome = next(e["nome"] for e in ESTACOES if e["uf"] == "CE")
+        r_ce = historico.serie_realizada(ce_nome, "best_match", 3650, caminho=banco2)
+        assert len(r_ce) == 1 and r_ce["score"].iloc[0] == 0.5 * calcular_risco(seco_h[ce_nome]["cape"][3], seco_h[ce_nome]["li"][3], seco_h[ce_nome]["cin"][3])[0]
         assert historico.limpar(0, banco) > 0 and historico.status(banco)["linhas"] == 0
 
     # Camadas do mapa: divisas e URL do GOES.

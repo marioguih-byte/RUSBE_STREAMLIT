@@ -11,12 +11,12 @@ Versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaçãodeSistem
 | **Mapa** | OpenStreetMap (padrão) ou Satélite, travado no Brasil (contorno + véu no entorno), botão ⌂ para recentralizar. Bolinhas de tamanho fixo (inclusive durante o zoom) com o score escrito dentro (opcional); a de maior risco fica por cima. A posição e o zoom são preservados ao fechar o painel. |
 | **Hora da previsão** | Controle deslizante de +0 h a +48 h: o mapa, os cartões e a tabela passam a mostrar a hora escolhida. |
 | **Tendência** | Seta ▲ ▼ ▬ por unidade (variação do score nas próximas 6 h), pico das próximas 24 h e horário do pico. A lista lateral pode ser ordenada por *Nome* ou *Maior risco*. |
-| **Detalhe da unidade** | Cartões (risco, CAPE, LI, CIN, tendência), gráfico de 48 h do score sobre as faixas de risco, gráficos de CAPE/LI/CIN e tabela horária. |
-| **Calibração** | Sensibilidade ao CAPE, sensibilidade ao Lifted Index e peso do CIN (1,0 = regra original). |
-| **Heurística ampliada** | Opcional (desligada por padrão). Soma ao score pontos por precipitação, rajada, gradiente de temperatura 850–500 hPa e nível de 0 °C, limitados a −4/+20 pontos e multiplicados por um peso ajustável. **Ainda não calibrada com observações.** Se a API não devolver essas variáveis, o painel avisa e segue com a heurística básica. |
-| **Ajuste por região** | Fatores de CAPE e de LI por UF (tabela editável no painel; valores iniciais em `config_regioes.json`, todos 1,0). |
+| **Detalhe da unidade** | Cartões (risco, CAPE, LI, CIN, tendência e variáveis extras), gráfico de 48 h do score sobre as faixas de risco, gráficos de CAPE/LI/CIN e das variáveis extras e tabela horária. |
+| **Regiões e variáveis extras** | O score usa CAPE, Lifted Index e CIN (regra original). Fatores de CAPE/LI por UF podem ser definidos em `config_regioes.json` (todos 1,0 por padrão). Precipitação, rajada, gradiente 850–500 hPa e nível de 0 °C aparecem como cartões e gráficos no detalhe da unidade e no histórico; para incluí-los no score há a opção `--heuristica-ampliada` do `alertas.py` (ainda não calibrada com observações). |
+| **Como o score foi calculado** | No detalhe de cada unidade, uma tabela mostra os pontos de CAPE, Lifted Index e CIN, a soma, o ajuste de chuva (se houver) e o score final. |
+| **Ajuste do Nordeste** | Em BA, CE, PE, RN e SE (`gate_precipitacao` em `config_regioes.json`), o score só vale integralmente se o modelo prevê chuva (≥ 0,1 mm/h) entre a hora atual e +3 h; senão é multiplicado por 0,5. Sem dado de precipitação o ajuste não é aplicado e o painel avisa. **Valores provisórios**, ainda não calibrados com observações; para desligar, esvazie `ufs`. |
 | **Camadas do mapa** | Divisas estaduais (ligadas por padrão) e topos de nuvem do GOES-East, infravermelho banda 13, via NASA GIBS (opcional, com controle de opacidade). |
-| **Histórico** | Grava em SQLite, uma vez por hora e por modelo, CAPE, LI, CIN e variáveis extras das próximas 48 h. O painel mostra o score realizado, como a previsão para um horário mudou entre execuções e exporta CSV com score recalculado. |
+| **Histórico** | Grava em SQLite, uma vez por hora e por modelo, CAPE, LI, CIN e variáveis extras das próximas 48 h. O painel mostra o score realizado e os gráficos de CAPE, LI, CIN e variáveis extras no período, como a previsão para um horário mudou entre execuções, e exporta CSV com score recalculado. |
 | **Exportação** | Tabela atual e séries horárias de 48 h em CSV (abre no Excel em português); mapa estático em PNG e relatório em PDF (mapa + ranking). |
 | **Acessibilidade** | Score escrito dentro da bolinha e barra lateral recolhida em telas pequenas. |
 | **Robustez** | 3 tentativas com espera crescente na API; se ela falhar, usa o último dado válido e avisa quantos minutos ele tem. Indicador "Dados · há N min" no cabeçalho. |
@@ -55,6 +55,12 @@ python validar.py                    # testes offline
 python validar.py --online           # relatório de sanidade com dados reais (cobertura, faixas, horizonte, extras, GOES)
 python validar.py --online --modelos # idem para os 12 modelos: mostra quais devolvem CAPE, LI e CIN
 ```
+
+## Sobre o score
+
+- Pontos: CAPE (0–45), Lifted Index (0–35) e CIN (−30 a +20), somados e limitados a 0–100.
+- **Sem energia** (CAPE < 300 J/kg), o Lifted Index soma no máximo 5 pontos e a baixa inibição (CIN) não soma: ar estável não vira "Moderado".
+- CAPE, LI e CIN medem *potencial*; não medem o disparo da convecção nem a umidade. Em regiões tropicais com CAPE quase sempre alto, o score tende a exagerar. Por isso existe o ajuste por chuva prevista (Nordeste) e os fatores por UF em `config_regioes.json`.
 
 ## Histórico
 

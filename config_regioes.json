@@ -50,5 +50,18 @@
  "SP": {
   "fator_cape": 1.0,
   "fator_li": 1.0
+ },
+ "gate_precipitacao": {
+  "ufs": [
+   "BA",
+   "CE",
+   "PE",
+   "RN",
+   "SE"
+  ],
+  "limiar_mm_h": 0.1,
+  "janela_h": 3,
+  "multiplicador": 0.5,
+  "observacao": "Nordeste: o score só vale integralmente se o modelo prevê chuva (>= limiar) entre a hora atual e janela_h horas à frente; senão é multiplicado. Valores provisórios: ajuste com observações."
  }
 }

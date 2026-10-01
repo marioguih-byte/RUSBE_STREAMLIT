@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from analise import extras_na_hora, parametros_da_unidade
+from analise import GatePrecipitacao, carregar_gate, extras_na_hora, janela_frente, multiplicador_do_gate, parametros_da_unidade
 from modelos import MODELOS, TZ_BRASILIA, ErroBuscaModelo, buscar_modelo
 from risco_raio import PARAMETROS_PADRAO, ParametrosRisco, calcular_risco
 from unidades import ESTACOES
@@ -123,23 +123,43 @@ def status(caminho: Optional[Path] = None) -> dict[str, Any]:
             "tamanho_mb": round(Path(caminho).stat().st_size / 1e6, 2), "modelos": modelos}
 
 
-def _com_score(df: pd.DataFrame, parametros: ParametrosRisco, regioes: Optional[dict[str, tuple[float, float]]]) -> pd.DataFrame:
-    """Acrescenta a coluna ``score`` recalculada com a calibração informada."""
+def _com_score(
+    df: pd.DataFrame,
+    parametros: ParametrosRisco,
+    regioes: Optional[dict[str, tuple[float, float]]],
+    gate: Optional[GatePrecipitacao] = None,
+) -> pd.DataFrame:
+    """Acrescenta a coluna ``score`` recalculada com a calibração (e o gate de chuva) informados.
+
+    O gate usa a chuva prevista na mesma execução entre a hora e ``janela_h`` horas à frente,
+    igual ao cálculo do painel; por isso a consulta precisa trazer essas horas seguintes.
+    """
+    gate = carregar_gate() if gate is None else gate
     uf_de = {e["nome"]: e["uf"] for e in ESTACOES}
+    chaves = ["modelo", "execucao", "unidade"]
+    ordenado = df.sort_values(chaves + ["valido"], kind="stable")
+    if gate.ufs:
+        chuva = ordenado.groupby(chaves, sort=False)["precip"].transform(
+            lambda s: pd.Series(janela_frente([None if pd.isna(v) else float(v) for v in s], gate.janela_h), index=s.index, dtype="float64")
+        )
+    else:
+        chuva = pd.Series(float("nan"), index=ordenado.index)
+
     cache: dict[str, ParametrosRisco] = {}
     scores: list[Optional[float]] = []
-    for linha in df.itertuples(index=False):
+    for linha, c in zip(ordenado.itertuples(index=False), chuva):
         uf = uf_de.get(linha.unidade, "")
         p = cache.setdefault(uf, parametros_da_unidade(parametros, uf, regioes))
         extras = None
         if p.peso_extras > 0:
-            serie = {c: [getattr(linha, c)] for c in COLUNAS_EXTRAS}
+            serie = {campo: [getattr(linha, campo)] for campo in COLUNAS_EXTRAS}
             extras = extras_na_hora(serie, 0)
         cape = None if pd.isna(linha.cape) else linha.cape
         li = None if pd.isna(linha.li) else linha.li
         cin = None if pd.isna(linha.cin) else linha.cin
-        scores.append(calcular_risco(cape, li, cin, p, extras)[0])
-    return df.assign(score=scores)
+        mult = multiplicador_do_gate(None if pd.isna(c) else float(c), uf, gate)
+        scores.append(calcular_risco(cape, li, cin, p, extras, mult)[0])
+    return df.assign(score=pd.Series(scores, index=ordenado.index, dtype="float64"))
 
 
 def _ler(sql: str, parametros: tuple, caminho: Optional[Path]) -> pd.DataFrame:
@@ -160,13 +180,15 @@ def serie_realizada(
 ) -> pd.DataFrame:
     """Score "realizado" segundo o modelo: o valor da previsão de 0 h de cada execução, ao longo do tempo."""
     limite = (datetime.now(TZ_BRASILIA) - timedelta(days=dias)).strftime("%Y-%m-%dT%H:%M")
+    janela = carregar_gate().janela_h  # horas seguintes necessárias para o gate de chuva
     df = _ler(
-        "SELECT * FROM previsoes WHERE modelo=? AND unidade=? AND horas=0 AND valido>=? ORDER BY valido",
-        (modelo_id, unidade, limite), caminho,
+        "SELECT * FROM previsoes WHERE modelo=? AND unidade=? AND horas<=? AND valido>=? ORDER BY valido",
+        (modelo_id, unidade, janela, limite), caminho,
     )
     if df.empty:
         return df
     df = _com_score(df, parametros, regioes)
+    df = df[df["horas"] == 0].copy()  # só a previsão de 0 h de cada execução
     df["tempo"] = pd.to_datetime(df["valido"])
     return df
 
@@ -191,13 +213,15 @@ def evolucao_previsao(
     caminho: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Como o score previsto para um mesmo horário mudou entre as execuções (da mais antiga à mais recente)."""
+    fim = (datetime.fromisoformat(valido) + timedelta(hours=carregar_gate().janela_h)).strftime("%Y-%m-%dT%H:%M")
     df = _ler(
-        "SELECT * FROM previsoes WHERE modelo=? AND unidade=? AND valido=? ORDER BY execucao",
-        (modelo_id, unidade, valido), caminho,
+        "SELECT * FROM previsoes WHERE modelo=? AND unidade=? AND valido>=? AND valido<=? ORDER BY execucao, valido",
+        (modelo_id, unidade, valido, fim), caminho,
     )
     if df.empty:
         return df
     df = _com_score(df, parametros, regioes)
+    df = df[df["valido"] == valido].copy()
     df["execucao_t"] = pd.to_datetime(df["execucao"])
     return df
 

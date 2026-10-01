@@ -36,8 +36,10 @@ st.set_page_config(
 try:
     import historico
     from analise import (
+        carregar_gate,
         carregar_regioes,
         consolidar,
+        explicar_hora,
         horas_a_frente,
         rotulo_horario,
         series_por_unidade,
@@ -149,12 +151,6 @@ def _inicializar_estado() -> None:
         "ultimo_clique_mapa": None,
         "versao_mapa": 0,
         "relatorio": None,
-        "regioes_v": 0,
-        "ampliada": False,
-        "peso_extras": 1.0,
-        "fator_cape": 1.0,
-        "fator_li": 1.0,
-        "peso_cin": 1.0,
     }
     for chave, valor in valores_iniciais.items():
         st.session_state.setdefault(chave, valor)
@@ -456,15 +452,25 @@ def _dados_grafico(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
     inicio, tempos = serie.get("idx_atual", 0), serie.get("tempos", [])
     rel = ctx["series"][nome]["rel"]
     linhas = []
+
+    def v(campo: str, i: int) -> Optional[float]:
+        valores = serie.get(campo, [])
+        return valores[i] if i < len(valores) else None
+
     for i in range(inicio, min(len(tempos), inicio + HORIZONTE_MAX_H + 1)):
         k = i - inicio
+        t850, t500 = v("t850", i), v("t500", i)
         linhas.append(
             {
                 "tempo": pd.to_datetime(tempos[i]),
-                "CAPE": serie["cape"][i] if i < len(serie.get("cape", [])) else None,
-                "LI": serie["li"][i] if i < len(serie.get("li", [])) else None,
-                "CIN": serie["cin"][i] if i < len(serie.get("cin", [])) else None,
+                "CAPE": v("cape", i),
+                "LI": v("li", i),
+                "CIN": v("cin", i),
                 "Score": rel[k] if k < len(rel) else None,
+                "Precipitação": v("precip", i),
+                "Rajada": v("rajada", i),
+                "Gradiente": (t850 - t500) if t850 is not None and t500 is not None else None,
+                "Nível 0 °C": v("nivel0", i),
             }
         )
     return pd.DataFrame(linhas)
@@ -499,19 +505,50 @@ def _grafico_score(df: pd.DataFrame, cores: dict[str, str], tempo_sel: pd.Timest
     return _tema_grafico(alt.layer(*camadas).properties(height=230, width="container"))
 
 
-def _grafico_variavel(df: pd.DataFrame, coluna: str, titulo: str, cor: str, tempo_sel: pd.Timestamp, linha_zero: bool = False) -> alt.Chart:
+def _grafico_variavel(
+    df: pd.DataFrame,
+    coluna: str,
+    titulo: str,
+    cor: str,
+    tempo_sel: Optional[pd.Timestamp] = None,
+    linha_zero: bool = False,
+    barras: bool = False,
+    formato_eixo: str = "%Hh",
+) -> alt.Chart:
     base = alt.Chart(df).encode(
-        x=alt.X("tempo:T", title=None, axis=alt.Axis(format="%Hh", labelAngle=0, tickCount=5)),
+        x=alt.X("tempo:T", title=None, axis=alt.Axis(format=formato_eixo, labelAngle=0, tickCount=5)),
         y=alt.Y(f"{coluna}:Q", title=titulo),
         tooltip=["tempo:T", alt.Tooltip(f"{coluna}:Q", format=".1f")],
     )
-    camadas = [base.mark_area(opacity=0.25, color=cor, line={"color": cor, "strokeWidth": 2}, interpolate="monotone")]
+    if barras:
+        camadas = [base.mark_bar(opacity=0.85, color=cor)]
+    else:
+        camadas = [base.mark_area(opacity=0.25, color=cor, line={"color": cor, "strokeWidth": 2}, interpolate="monotone")]
     if linha_zero:
         camadas.append(alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#8895a7", strokeDash=[2, 3]).encode(y="y:Q"))
-    camadas.append(
-        alt.Chart(pd.DataFrame({"tempo": [tempo_sel]})).mark_rule(color="#e0b400", strokeDash=[4, 3], strokeWidth=1.5).encode(x="tempo:T")
-    )
+    if tempo_sel is not None:
+        camadas.append(
+            alt.Chart(pd.DataFrame({"tempo": [tempo_sel]})).mark_rule(color="#e0b400", strokeDash=[4, 3], strokeWidth=1.5).encode(x="tempo:T")
+        )
     return _tema_grafico(alt.layer(*camadas).properties(height=150, width="container"))
+
+
+def _graficos_extras(df: pd.DataFrame, tempo_sel: Optional[pd.Timestamp] = None, formato_eixo: str = "%Hh") -> None:
+    """Gráficos de precipitação, rajada, gradiente 850–500 hPa e nível de 0 °C (só os que têm dados)."""
+    definicoes = [
+        ("Precipitação", "Precipitação (mm/h)", "#38bdf8", False, True),
+        ("Rajada", "Rajada de vento (km/h)", "#f472b6", False, False),
+        ("Gradiente", "T850 − T500 (°C)", "#fb923c", False, False),
+        ("Nível 0 °C", "Nível de 0 °C (m)", "#94a3b8", False, False),
+    ]
+    disponiveis = [d for d in definicoes if d[0] in df and df[d[0]].notna().any()]
+    for inicio in range(0, len(disponiveis), 2):
+        colunas = st.columns(2)
+        for coluna_ui, (campo, titulo, cor, zero, barras) in zip(colunas, disponiveis[inicio : inicio + 2]):
+            coluna_ui.altair_chart(
+                _grafico_variavel(df, campo, titulo, cor, tempo_sel, linha_zero=zero, barras=barras, formato_eixo=formato_eixo),
+                theme=None,
+            )
 
 
 def _tabela_horaria(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
@@ -543,6 +580,42 @@ def _tabela_horaria(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
         }
         linhas.append(linha)
     return pd.DataFrame(linhas)
+
+
+def _html_explicacao(ex: dict[str, Any]) -> str:
+    """Tabela (HTML em uma linha por bloco) com a contribuição de cada componente do score."""
+    if ex["score"] is None:
+        return "<div class='nota-tab'>Sem dados de CAPE para esta hora.</div>"
+
+    def pts(valor: float) -> str:
+        return f"{valor:+.0f}" if valor else "0"
+
+    linhas = []
+    fc = ex["fator_cape_regiao"]
+    cape_txt = f"{_numero(ex['cape_ef'])} J/kg" + (f" (ajustado por região ×{fc:.2f})" if abs(fc - 1) > 1e-9 else "")
+    linhas.append(("CAPE", cape_txt, ex["pts_cape"]))
+    if ex["li_ef"] is not None:
+        linhas.append(("Lifted Index", f"{ex['li_ef']:.1f} °C" + (" · limitado: sem energia (CAPE < 300)" if ex["sem_energia"] else ""), ex["pts_li"]))
+    if ex.get("cin") is not None:
+        nivel_cin = "inibição baixa (favorece o disparo)" if ex["pts_cin"] > 0 else ("inibição moderada" if ex["pts_cin"] == 0 else "inibição alta (reduz o risco)")
+        linhas.append(("CIN", f"{abs(ex['cin']):.0f} J/kg · {nivel_cin}" + (" · bônus ignorado: sem energia (CAPE < 300)" if ex["sem_energia"] else ""), ex["pts_cin"]))
+    if ex["pts_extras"]:
+        linhas.append(("Variáveis extras", "chuva, rajada, gradiente, nível de 0 °C", ex["pts_extras"]))
+    corpo = "".join(f"<tr><td>{n}</td><td>{escape(d)}</td><td>{pts(p)}</td></tr>" for n, d, p in linhas)
+    corpo += f"<tr><td><b>Soma</b></td><td></td><td>{ex['subtotal']:.0f}</td></tr>"
+    if ex["gate_configurado"]:
+        if ex["gate_sem_dado"]:
+            texto, valor = "Região com exigência de chuva prevista, mas sem dado de precipitação: ajuste não aplicado", "×1"
+        elif ex["gate_aplicado"]:
+            texto = (f"Sem chuva prevista até +{ex['janela_h']} h (máx. {ex['chuva_janela']:.1f} mm/h, abaixo de {ex['limiar']:.1f}): "
+                     "score reduzido nesta região")
+            valor = f"×{ex['multiplicador']:.2f}"
+        else:
+            texto = f"Chuva prevista até +{ex['janela_h']} h ({ex['chuva_janela']:.1f} mm/h): score mantido"
+            valor = "×1"
+        corpo += f"<tr><td>Chuva prevista</td><td>{escape(texto)}</td><td>{valor}</td></tr>"
+    corpo += f"<tr><td><b>Score</b></td><td></td><td>{ex['score']:.1f}</td></tr>"
+    return f"<table class='expl'>{corpo}</table>"
 
 
 def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
@@ -577,7 +650,7 @@ def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
                 f"<div class='dlg-card'><span>Tendência (6 h)</span><b>{seta_txt}{delta_txt}</b>"
                 f"<small>pico 24 h: {pico_txt} · {hora_pico}</small></div>"
             )
-            if ctx.get("ampliada"):
+            if ctx.get("extras"):
                 extras_cartoes = [
                     ("Precipitação", _numero(agora["Precip. (mm/h)"], 1), "mm/h"),
                     ("Rajada", _numero(agora["Rajada (km/h)"]), "km/h"),
@@ -586,6 +659,12 @@ def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
                 ]
                 cartoes += [f"<div class='dlg-card'><span>{n}</span><b>{v}</b><small>{u}</small></div>" for n, v, u in extras_cartoes]
             st.markdown(f"<div class='dlg-resumo'>{''.join(cartoes)}</div>", unsafe_allow_html=True)
+
+            st.markdown("#### Como o score foi calculado")
+            st.markdown(_html_explicacao(explicar_hora(
+                ctx["dados"].get(nome, {}), ctx["deslocamento"], str(agora["UF"]),
+                ctx["parametros"], ctx["regioes"], ctx["gate"],
+            )), unsafe_allow_html=True)
 
             df = _dados_grafico(nome, ctx)
             tempo_sel = df["tempo"].iloc[min(ctx["deslocamento"], len(df) - 1)] if not df.empty else pd.Timestamp.now()
@@ -599,6 +678,7 @@ def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
             c1.altair_chart(_grafico_variavel(df, "CAPE", "CAPE (J/kg)", "#e0761f", tempo_sel), theme=None)
             c2.altair_chart(_grafico_variavel(df, "LI", "Lifted Index (°C)", "#56b4e9", tempo_sel, linha_zero=True), theme=None)
             c3.altair_chart(_grafico_variavel(df, "CIN", "CIN (J/kg)", "#a78bfa", tempo_sel, linha_zero=True), theme=None)
+            _graficos_extras(df, tempo_sel)
 
             st.markdown("#### Previsão horária — 24 horas a partir da hora selecionada")
             horario = _tabela_horaria(nome, ctx)
@@ -695,6 +775,10 @@ def renderizar_estilo() -> None:
         [data-testid="stSidebar"] [data-testid="stExpander"] { border:1px solid #2b323c; border-radius:10px; background:#1b2027; }
         [data-testid="stSidebar"] [data-testid="stExpander"] summary { font-weight:600; }
         [data-testid="stMain"] [data-testid="stSlider"] { margin-top:.5rem; }
+        .expl { width:100%; border-collapse:collapse; font-size:.85rem; margin:.1rem 0 .8rem; }
+        .expl td { padding:.28rem .55rem; border-bottom:1px solid #2b323c; color:#d5dbe4; }
+        .expl td:first-child { white-space:nowrap; color:#a9b3c1; }
+        .expl td:last-child { text-align:right; font-weight:700; color:#fff; white-space:nowrap; }
         .nota-tab { color:#a9b3c1; font-size:.82rem; margin:.1rem 0 .5rem; }
         .rodape-sec { margin-top:.4rem; color:#8895a7; font-size:.78rem; }
         @media (max-width: 760px) {
@@ -705,35 +789,6 @@ def renderizar_estilo() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _restaurar_calibracao() -> None:
-    st.session_state["fator_cape"] = 1.0
-    st.session_state["fator_li"] = 1.0
-    st.session_state["peso_cin"] = 1.0
-    st.session_state["ampliada"] = False
-    st.session_state["peso_extras"] = 1.0
-    st.session_state["regioes_v"] += 1  # novo editor da tabela por UF, com os valores do arquivo
-
-
-def _tabela_regioes_inicial() -> pd.DataFrame:
-    fatores = carregar_regioes()
-    return pd.DataFrame(
-        [{"UF": uf, "CAPE (×)": fc, "LI (×)": fl} for uf, (fc, fl) in sorted(fatores.items())]
-    )
-
-
-def _regioes_do_editor(editado: pd.DataFrame) -> dict[str, tuple[float, float]]:
-    """Converte a tabela editada em {UF: (fator CAPE, fator LI)}; valores inválidos voltam a 1,0."""
-    saida: dict[str, tuple[float, float]] = {}
-    for _, linha in editado.iterrows():
-        try:
-            fc = float(linha["CAPE (×)"])
-            fl = float(linha["LI (×)"])
-        except (TypeError, ValueError):
-            fc = fl = 1.0
-        saida[str(linha["UF"])] = (fc if fc > 0 else 1.0, fl if fl > 0 else 1.0)
-    return saida
 
 
 def serie_longa(dados: dict[str, Any], series: dict[str, dict[str, Any]]) -> pd.DataFrame:
@@ -823,12 +878,25 @@ def painel_historico(
         )
         linha = (
             alt.Chart(realizado).mark_line(point=True, strokeWidth=2.5, color="#f2f4f8", interpolate="monotone")
-            .encode(x=alt.X("tempo:T", title=None, axis=alt.Axis(format="%d/%m %Hh", labelAngle=0)),
+            .encode(x=alt.X("tempo:T", title=None, axis=alt.Axis(format="%d/%m %Hh", labelAngle=0, tickCount=6)),
                     y=alt.Y("score:Q", scale=alt.Scale(domain=[0, 100])),
                     tooltip=["tempo:T", alt.Tooltip("score:Q", format=".1f"), alt.Tooltip("cape:Q", title="CAPE", format=".0f"),
                              alt.Tooltip("li:Q", title="LI", format=".1f")])
         )
         st.altair_chart(_tema_grafico(alt.layer(faixa, linha).properties(height=220, width="container")), theme=None)
+
+        # Demais variáveis no mesmo período (mesmos gráficos do detalhe da unidade).
+        st.markdown("##### Variáveis no período")
+        dfv = realizado.rename(columns={"cape": "CAPE", "li": "LI", "cin": "CIN", "precip": "Precipitação", "rajada": "Rajada", "nivel0": "Nível 0 °C"})
+        dfv["Gradiente"] = dfv["t850"] - dfv["t500"]
+        # Rótulo do eixo conforme a duração do histórico: com menos de 3 dias mostra também a hora.
+        duracao = (dfv["tempo"].max() - dfv["tempo"].min()) if len(dfv) else pd.Timedelta(0)
+        formato = "%d/%m %Hh" if duracao <= pd.Timedelta(days=3) else "%d/%m"
+        v1, v2, v3 = st.columns(3)
+        v1.altair_chart(_grafico_variavel(dfv, "CAPE", "CAPE (J/kg)", "#e0761f", formato_eixo=formato), theme=None)
+        v2.altair_chart(_grafico_variavel(dfv, "LI", "Lifted Index (°C)", "#56b4e9", linha_zero=True, formato_eixo=formato), theme=None)
+        v3.altair_chart(_grafico_variavel(dfv, "CIN", "CIN (J/kg)", "#a78bfa", linha_zero=True, formato_eixo=formato), theme=None)
+        _graficos_extras(dfv, formato_eixo=formato)
 
     validos = historico.horarios_com_revisoes(unidade, modelo_id, dias)
     st.markdown("##### Como a previsão para um horário mudou entre as execuções")
@@ -921,34 +989,6 @@ def main() -> None:
             goes = st.toggle("Topos de nuvem (GOES-East)", help="Infravermelho do GOES-East (NASA GIBS), atualizado a cada ~10 min com atraso de cerca de 30 min. Requer internet no navegador.")
             goes_opacidade = st.slider("Opacidade das nuvens", 0.2, 0.9, 0.6, step=0.05) if goes else 0.6
 
-        with st.expander("Calibração da heurística"):
-            st.caption("1,0 = regra original. Ajuste a sensibilidade da heurística.")
-            st.slider("Sensibilidade ao CAPE (×)", 0.5, 2.0, step=0.05, key="fator_cape")
-            st.slider("Sensibilidade ao Lifted Index (×)", 0.5, 2.0, step=0.05, key="fator_li")
-            st.slider("Peso do CIN (×)", 0.0, 2.0, step=0.05, key="peso_cin")
-            st.toggle(
-                "Heurística ampliada",
-                key="ampliada",
-                help="Soma ao score pontos por precipitação, rajada, gradiente de temperatura 850–500 hPa e nível de 0 °C. "
-                     "Ainda não calibrada com observações: use com cautela e compare com o histórico.",
-            )
-            if st.session_state["ampliada"]:
-                st.slider("Peso das variáveis extras (×)", 0.25, 2.0, step=0.05, key="peso_extras")
-            with st.expander("Ajuste por região (UF)"):
-                st.caption("Multiplica o CAPE e o LI da UF antes de calcular o score (1,0 = sem ajuste). Valores iniciais: config_regioes.json.")
-                editado = st.data_editor(
-                    _tabela_regioes_inicial(),
-                    key=f"regioes_{st.session_state['regioes_v']}",
-                    hide_index=True,
-                    width="stretch",
-                    height=300,
-                    disabled=["UF"],
-                    column_config={
-                        "CAPE (×)": st.column_config.NumberColumn(min_value=0.25, max_value=3.0, step=0.05, format="%.2f"),
-                        "LI (×)": st.column_config.NumberColumn(min_value=0.25, max_value=3.0, step=0.05, format="%.2f"),
-                    },
-                )
-            st.button("Restaurar padrão", on_click=_restaurar_calibracao, width="stretch")
 
     if modelo_id != st.session_state["modelo_anterior"]:
         st.session_state["modelo_anterior"] = modelo_id
@@ -957,13 +997,9 @@ def main() -> None:
         recriar_mapa()
 
     cores = CORES_NIVEL
-    regioes = _regioes_do_editor(editado)
-    parametros = ParametrosRisco(
-        st.session_state["fator_cape"],
-        st.session_state["fator_li"],
-        st.session_state["peso_cin"],
-        st.session_state["peso_extras"] if st.session_state["ampliada"] else 0.0,
-    )
+    parametros = ParametrosRisco()  # regra original (sem ajustes de sensibilidade)
+    regioes = carregar_regioes()  # fatores de CAPE/LI por UF (config_regioes.json; neutros por padrão)
+    gate = carregar_gate()  # exigência de chuva prevista nas UFs do Nordeste (config_regioes.json)
 
     # ------------------------------------------------------------------ dados
     try:
@@ -982,13 +1018,12 @@ def main() -> None:
             historico.registrar(dados, modelo_id)
         except Exception as erro:
             st.sidebar.caption(f"Histórico indisponível: {erro}")
-    ampliada_ativa = bool(st.session_state["ampliada"] and dados.get("_extras"))
-    if st.session_state["ampliada"] and not dados.get("_extras"):
+    extras_disponiveis = bool(dados.get("_extras"))
+    if gate.ufs and not extras_disponiveis:
         st.sidebar.warning(
-            "A API não devolveu as variáveis extras para este modelo "
-            f"({dados.get('_erro_extras') or 'sem detalhe'}); usando a heurística básica."
+            "Sem dados de precipitação deste modelo: o ajuste do Nordeste (exigir chuva prevista) não foi aplicado "
+            f"({dados.get('_erro_extras') or 'sem detalhe'})."
         )
-        parametros = ParametrosRisco(parametros.fator_cape, parametros.fator_li, parametros.peso_cin, 0.0)
 
     fonte = nome_modelo
 
@@ -1014,7 +1049,7 @@ def main() -> None:
     rotulo_hora = rotulo_horario(dados, deslocamento)
 
     # ------------------------------------------------------------------ cálculo
-    series = series_por_unidade(dados, parametros, regioes)
+    series = series_por_unidade(dados, parametros, regioes, gate)
     tabela = consolidar(dados, series, deslocamento)
     niveis = list(reversed(ROTULOS))
     contagens = tabela["Risco"].value_counts()
@@ -1031,7 +1066,10 @@ def main() -> None:
         "divisas": divisas,
         "goes": goes,
         "goes_opacidade": goes_opacidade,
-        "ampliada": ampliada_ativa,
+        "extras": extras_disponiveis,
+        "gate": gate,
+        "regioes": regioes,
+        "parametros": parametros,
     }
 
     # ------------------------------------------------------------------ barra lateral (lista de unidades)
@@ -1120,7 +1158,7 @@ def main() -> None:
             )
             colunas = ["Unidade", "UF", "Risco", "Score", "Tendência", "Δ 6 h", "Pico 24 h", "Hora do pico",
                        "CAPE (J/kg)", "Lifted Index (°C)", "CIN (J/kg)"]
-            if ampliada_ativa:
+            if extras_disponiveis:
                 colunas += ["Precip. (mm/h)", "Rajada (km/h)", "Gradiente 850–500 (°C)", "Nível 0 °C (m)"]
             exibicao = tabela[colunas].sort_values("Score", ascending=False, na_position="last")
 
@@ -1192,8 +1230,7 @@ def main() -> None:
     with st.expander("Como interpretar o painel"):
         st.write(
             "O score é uma heurística baseada em CAPE, Lifted Index e CIN. CAPE alto e Lifted Index mais negativo "
-            "elevam o risco; CIN elevado reduz a probabilidade de disparo convectivo. Com a heurística ampliada ligada, precipitação, "
-            "rajada, gradiente 850–500 hPa e nível de 0 °C somam pontos (limitados e ainda não calibrados com observações). A seta indica a tendência do score "
+            "elevam o risco; CIN elevado reduz a probabilidade de disparo convectivo. No Nordeste, o score só vale integralmente quando o modelo também prevê chuva nas próximas horas (veja 'Como o score foi calculado' em cada unidade). Sem energia (CAPE < 300 J/kg), o Lifted Index e a baixa inibição não somam pontos altos. A seta indica a tendência do score "
             "nas próximas 6 h (▲ sobe, ▼ desce, ▬ estável). O painel serve ao acompanhamento meteorológico e não substitui "
             "alertas oficiais ou sistemas de detecção de descargas atmosféricas."
         )

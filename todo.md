@@ -31,3 +31,7 @@
 - [ ] Rodar `validar.py --online` no ambiente de produção e conferir a camada GOES (o ambiente de desenvolvimento não alcança a Open-Meteo nem a NASA GIBS).
 - [ ] Calibrar os pesos da heurística ampliada e os fatores por UF com observações (o histórico já guarda o necessário).
 
+- [x] Removida a aba "Calibração da heurística" (padrões mantidos); gráficos das variáveis extras no detalhe e no histórico.
+- [x] Revisão de falsos alarmes no Nordeste: explicação do score por unidade, regra de baixa energia e ajuste por chuva prevista (BA, CE, PE, RN, SE; provisório).
+- [ ] Calibrar o multiplicador e a janela do ajuste do Nordeste com observações de raios (o histórico guarda o necessário).
+

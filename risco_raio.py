@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 # (limite superior do score, rótulo, cor da paleta padrão)
 NIVEIS_RISCO = [
@@ -87,75 +87,105 @@ def ajuste_extras(extras: Optional[dict[str, Optional[float]]]) -> float:
     return max(AJUSTE_MINIMO, min(AJUSTE_MAXIMO, pontos))
 
 
+# Sem energia disponível (CAPE efetivo abaixo disto) não há tempestade a "disparar": o Lifted Index
+# e a baixa inibição (CIN) deixam de somar pontos altos, para que ar estável não vire "Moderado".
+ENERGIA_MINIMA_CAPE = 300.0  # J/kg
+PONTOS_MAX_LI_SEM_ENERGIA = 5.0
+
+
+def _pontos_cape(cape: float) -> float:
+    if cape < 300:
+        return 0.0
+    if cape < 1000:
+        return 10.0
+    if cape < 2500:
+        return 22.0
+    if cape < 3500:
+        return 34.0
+    return 45.0
+
+
+def _pontos_li(lifted_index: float) -> float:
+    if lifted_index > 2:
+        return 0.0
+    if lifted_index > 0:
+        return 5.0
+    if lifted_index > -2:
+        return 12.0
+    if lifted_index > -6:
+        return 22.0
+    if lifted_index > -9:
+        return 30.0
+    return 35.0
+
+
+def _pontos_cin(cin: float) -> float:
+    cin_abs = abs(cin)
+    if cin_abs < 25:
+        return 20.0
+    if cin_abs < 50:
+        return 10.0
+    if cin_abs < 100:
+        return 0.0
+    if cin_abs < 200:
+        return -15.0
+    return -30.0
+
+
+def detalhar_risco(
+    cape: Optional[float],
+    lifted_index: Optional[float],
+    cin: Optional[float],
+    parametros: ParametrosRisco = PARAMETROS_PADRAO,
+    extras: Optional[dict[str, Optional[float]]] = None,
+    multiplicador_gate: Optional[float] = None,
+) -> dict[str, Any]:
+    """Score e a contribuição de cada componente (para explicar o resultado ao usuário).
+
+    ``multiplicador_gate`` (ex.: 0,5) multiplica o score quando uma condição de disparo exigida
+    (como chuva prevista) não é atendida; ``None`` = sem gate.
+    """
+    vazio: dict[str, Any] = {"score": None, "cape_ef": None, "li_ef": None, "pts_cape": 0.0, "pts_li": 0.0, "pts_cin": 0.0,
+                              "pts_extras": 0.0, "sem_energia": False, "subtotal": None, "multiplicador": 1.0}
+    if cape is None:
+        return vazio
+
+    cape_ef = cape * parametros.fator_cape
+    li_ef = lifted_index * parametros.fator_li if lifted_index is not None else None
+    pts_cape = _pontos_cape(cape_ef)
+    pts_li = _pontos_li(li_ef) if li_ef is not None else 0.0
+    pts_cin = _pontos_cin(cin) * parametros.peso_cin if cin is not None else 0.0
+    sem_energia = cape_ef < ENERGIA_MINIMA_CAPE
+    if sem_energia:
+        pts_li = min(pts_li, PONTOS_MAX_LI_SEM_ENERGIA)
+        pts_cin = min(pts_cin, 0.0)
+    pts_extras = ajuste_extras(extras) * parametros.peso_extras if parametros.peso_extras > 0 else 0.0
+
+    subtotal = pts_cape + pts_li + pts_cin + pts_extras
+    multiplicador = 1.0 if multiplicador_gate is None else multiplicador_gate
+    score = max(0.0, min(100.0, subtotal * multiplicador))
+    return {"score": round(score, 1), "cape_ef": cape_ef, "li_ef": li_ef, "pts_cape": pts_cape, "pts_li": pts_li,
+            "pts_cin": pts_cin, "pts_extras": pts_extras, "sem_energia": sem_energia, "subtotal": subtotal,
+            "multiplicador": multiplicador}
+
+
 def calcular_risco(
     cape: Optional[float],
     lifted_index: Optional[float],
     cin: Optional[float],
     parametros: ParametrosRisco = PARAMETROS_PADRAO,
     extras: Optional[dict[str, Optional[float]]] = None,
+    multiplicador_gate: Optional[float] = None,
 ) -> tuple[Optional[float], str, str]:
     """Calcula um escore de risco de raio com base em CAPE, LI e CIN.
 
-    CAPE alto favorece a convecção profunda; Lifted Index negativo representa
-    maior instabilidade; e CIN muito negativo reduz a probabilidade de disparo
-    convectivo. A função retorna ``(escore, nível, cor)`` (cor da paleta padrão).
-    Com ``parametros`` padrão o resultado é idêntico ao da versão original; ``extras`` só
-    entra na conta se ``parametros.peso_extras`` > 0.
+    CAPE alto favorece a convecção profunda; Lifted Index negativo representa maior instabilidade;
+    e CIN alto reduz a probabilidade de disparo convectivo. Sem energia (CAPE < 300 J/kg), o LI e a
+    baixa inibição não somam pontos altos. ``extras`` só entra na conta se ``parametros.peso_extras`` > 0.
+    A função retorna ``(escore, nível, cor)`` (cor da paleta padrão).
     """
-    if cape is None:
+    detalhe = detalhar_risco(cape, lifted_index, cin, parametros, extras, multiplicador_gate)
+    if detalhe["score"] is None:
         return None, "Sem dados", COR_SEM_DADOS
-
-    cape = cape * parametros.fator_cape
-    if lifted_index is not None:
-        lifted_index = lifted_index * parametros.fator_li
-
-    score = 0.0
-
-    if cape < 300:
-        score += 0
-    elif cape < 1000:
-        score += 10
-    elif cape < 2500:
-        score += 22
-    elif cape < 3500:
-        score += 34
-    else:
-        score += 45
-
-    if lifted_index is None:
-        pass
-    elif lifted_index > 2:
-        score += 0
-    elif lifted_index > 0:
-        score += 5
-    elif lifted_index > -2:
-        score += 12
-    elif lifted_index > -6:
-        score += 22
-    elif lifted_index > -9:
-        score += 30
-    else:
-        score += 35
-
-    if cin is None:
-        pass
-    else:
-        cin_abs = abs(cin)
-        if cin_abs < 25:
-            contribuicao = 20
-        elif cin_abs < 50:
-            contribuicao = 10
-        elif cin_abs < 100:
-            contribuicao = 0
-        elif cin_abs < 200:
-            contribuicao = -15
-        else:
-            contribuicao = -30
-        score += contribuicao * parametros.peso_cin
-
-    if parametros.peso_extras > 0:
-        score += ajuste_extras(extras) * parametros.peso_extras
-
-    score = max(0, min(100, score))
-    rotulo, cor = classificar_risco(score)
-    return round(score, 1), rotulo, cor
+    rotulo, cor = classificar_risco(detalhe["score"])
+    return detalhe["score"], rotulo, cor
