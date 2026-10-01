@@ -10,8 +10,8 @@ Esta é a versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaç�
 |---|---|
 | Modelos meteorológicos | Seleção entre Best Match e os modelos globais disponíveis no notebook. |
 | Atualização de dados | Consulta à API de previsão com cache de 10 minutos e botão de atualização manual. |
-| Mapa | Marcadores dimensionados e coloridos conforme o escore de risco por unidade, com leitura breve no próprio mapa. |
-| Visão operacional | Barra lateral com modelo, estilo do mapa, centralização, pesquisa, legenda e lista clicável das 40 unidades. |
+| Mapa | OpenStreetMap como padrão (opção de Satélite), visão centralizada e travada no Brasil, contorno do país com véu suave no entorno, botão ⌂ para recentralizar, legenda de risco sobre o mapa e marcadores dimensionados e coloridos conforme o escore. |
+| Visão operacional | Cabeçalho com modelo e hora de referência, cartões de contagem por nível de risco, destaque da unidade de maior risco e barra lateral com modelo, estilo do mapa, pesquisa, ordenação (nome ou maior risco) e lista clicável das 40 unidades. |
 | Detalhamento | Janela escura equivalente ao pop-up do notebook, com 24 leituras horárias de CAPE, Lifted Index, CIN, score e risco. |
 
 ## Estrutura do projeto
@@ -19,6 +19,7 @@ Esta é a versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaç�
 | Arquivo | Finalidade |
 |---|---|
 | `app.py` | Ponto de entrada do dashboard Streamlit. |
+| `dados/` | Contorno e máscara simplificados do Brasil usados no mapa (Natural Earth, domínio público). |
 | `unidades.py` | Lista completa das 40 unidades e respectivas coordenadas. |
 | `modelos.py` | Consulta dos modelos e normalização da resposta meteorológica. |
 | `risco_raio.py` | Heurística de classificação de risco. |
@@ -38,7 +39,7 @@ A aplicação estará disponível normalmente em `http://localhost:8501`.
 
 ## Interação com as unidades
 
-Use a pesquisa ou clique em qualquer unidade da barra lateral. O mapa aproxima a localização e abre o detalhamento. A primeira linha da tabela representa a hora de referência atual; as demais linhas mostram as 23 horas seguintes, com cores coerentes com o nível de risco. Os marcadores do mapa também mantêm um pop-up resumido e acionam o mesmo fluxo de detalhe quando selecionados.
+Use a pesquisa ou clique em qualquer unidade da barra lateral. O mapa permanece enquadrado no Brasil e o detalhamento é aberto sobre ele. A primeira linha da tabela representa a hora de referência atual; as demais linhas mostram as 23 horas seguintes, com cores coerentes com o nível de risco. Os marcadores do mapa também mantêm um pop-up resumido e acionam o mesmo fluxo de detalhe quando selecionados.
 
 ## Publicação no Streamlit Community Cloud
 
