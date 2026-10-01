@@ -69,9 +69,18 @@ def _inicializar_estado() -> None:
         "abrir_popup": False,
         "ultimo_clique_mapa": None,
         "versao_mapa": 0,
+        "vista_atual": None,    # última posição/zoom reportados pelo mapa
+        "vista_inicial": None,  # posição usada ao (re)criar o mapa; fixa por versão
+        "chave_mapa": None,
     }
     for chave, valor in valores_iniciais.items():
         st.session_state.setdefault(chave, valor)
+
+
+def recriar_mapa_na_mesma_vista() -> None:
+    """Descarta o clique antigo do componente sem perder a posição do mapa."""
+    st.session_state["vista_inicial"] = st.session_state["vista_atual"]
+    st.session_state["versao_mapa"] += 1
 
 
 def _valor_da_hora(serie: list[Optional[float]], indice: int) -> Optional[float]:
@@ -148,10 +157,12 @@ def serie_da_estacao(nome: str, dados: dict[str, Any]) -> pd.DataFrame:
 
 
 class AjusteBrasil(MacroElement):
-    """Mantém o mapa enquadrado no Brasil e oferece o botão de recentralizar.
+    """Mantém o mapa limitado ao Brasil e oferece o botão de recentralizar.
 
     O zoom mínimo é calculado no navegador a partir do tamanho do mapa, de modo
-    que não é possível afastar a visão além do território brasileiro.
+    que não é possível afastar a visão além do território brasileiro. Se uma
+    ``vista`` (lat, lng, zoom) for informada, o mapa abre exatamente nela; caso
+    contrário, abre enquadrando o Brasil inteiro.
     """
 
     _template = Template(
@@ -160,13 +171,24 @@ class AjusteBrasil(MacroElement):
         (function () {
             var mapa = {{ this._parent.get_name() }};
             var limites = L.latLngBounds({{ this.limites }});
-            function ajustar() {
+            var vista = {{ this.vista }};
+            function limitarZoom() {
                 mapa.invalidateSize();
                 mapa.setMinZoom(mapa.getBoundsZoom(limites, false, L.point(8, 8)));
+            }
+            function enquadrar() {
+                limitarZoom();
                 mapa.fitBounds(limites, {padding: [8, 8], animate: false});
             }
-            mapa.whenReady(ajustar);
-            window.addEventListener('resize', ajustar);
+            mapa.whenReady(function () {
+                if (vista) {
+                    limitarZoom();
+                    mapa.setView([vista.lat, vista.lng], vista.zoom, {animate: false});
+                } else {
+                    enquadrar();
+                }
+            });
+            window.addEventListener('resize', limitarZoom);
 
             var controle = L.control({position: 'topleft'});
             controle.onAdd = function () {
@@ -179,7 +201,7 @@ class AjusteBrasil(MacroElement):
                 L.DomEvent.disableClickPropagation(caixa);
                 L.DomEvent.on(botao, 'click', function (e) {
                     L.DomEvent.preventDefault(e);
-                    ajustar();
+                    enquadrar();
                 });
                 return caixa;
             };
@@ -189,10 +211,11 @@ class AjusteBrasil(MacroElement):
         """
     )
 
-    def __init__(self, limites: list[list[float]]):
+    def __init__(self, limites: list[list[float]], vista: Optional[dict[str, float]] = None):
         super().__init__()
         self._name = "AjusteBrasil"
         self.limites = json.dumps(limites)
+        self.vista = json.dumps(vista)
 
 
 def _legenda_mapa() -> str:
@@ -219,12 +242,15 @@ def _legenda_mapa() -> str:
     """
 
 
-def criar_mapa(tabela: pd.DataFrame, estilo: str) -> folium.Map:
-    """Cria o mapa Folium travado no Brasil, com marcadores clicáveis."""
+def criar_mapa(tabela: pd.DataFrame, estilo: str, vista: Optional[dict[str, float]] = None) -> folium.Map:
+    """Cria o mapa Folium travado no Brasil, com marcadores clicáveis.
+
+    ``vista`` restaura exatamente a posição/zoom anteriores quando o mapa é recriado.
+    """
     configuracao = TILES[estilo]
     mapa = folium.Map(
-        location=CENTRO_BRASIL,
-        zoom_start=ZOOM_BRASIL,
+        location=[vista["lat"], vista["lng"]] if vista else CENTRO_BRASIL,
+        zoom_start=vista["zoom"] if vista else ZOOM_BRASIL,
         tiles=configuracao["tiles"],
         attr=configuracao["attr"],
         control_scale=True,
@@ -294,7 +320,7 @@ def criar_mapa(tabela: pd.DataFrame, estilo: str) -> folium.Map:
             popup=folium.Popup(popup_html, max_width=320),
         ).add_to(mapa)
 
-    mapa.add_child(AjusteBrasil(LIMITES_BRASIL))
+    mapa.add_child(AjusteBrasil(LIMITES_BRASIL, vista))
     mapa.get_root().html.add_child(Element(_legenda_mapa()))
     return mapa
 
@@ -347,8 +373,8 @@ def abrir_detalhamento(nome: str, dados: dict[str, Any], modelo_id: str) -> None
         if st.button("Fechar", type="primary", width="stretch"):
             st.session_state["abrir_popup"] = False
             st.session_state["ultimo_clique_mapa"] = None
-            # Nova chave = componente novo, que esquece o último marcador clicado.
-            st.session_state["versao_mapa"] += 1
+            # Componente novo (esquece o clique), reaberto na mesma posição/zoom.
+            recriar_mapa_na_mesma_vista()
             st.rerun()
 
     janela()
@@ -446,7 +472,7 @@ def main() -> None:
         if st.button("Atualizar dados de todos os modelos", width="stretch"):
             carregar_dados.clear()
             st.session_state["ultimo_clique_mapa"] = None
-            st.session_state["versao_mapa"] += 1
+            recriar_mapa_na_mesma_vista()
 
         st.divider()
         st.caption("ESTILO DO MAPA")
@@ -456,7 +482,7 @@ def main() -> None:
         st.session_state["modelo_anterior"] = modelo_id
         st.session_state["ultimo_clique_mapa"] = None
         st.session_state["abrir_popup"] = False
-        st.session_state["versao_mapa"] += 1
+        recriar_mapa_na_mesma_vista()
 
     try:
         with st.spinner(f"Buscando {nome_modelo} para {len(ESTACOES)} unidades..."):
@@ -535,14 +561,26 @@ def main() -> None:
     st.markdown(f"<div class='destaque' style='--cor:{cor_destaque}'>{destaque}</div>", unsafe_allow_html=True)
     st.markdown("<div class='secao'>Mapa de unidades monitoradas</div>", unsafe_allow_html=True)
 
-    mapa = criar_mapa(tabela, estilo)
+    # Trocar de estilo recria o mapa; a posição atual é mantida.
+    chave_mapa = (modelo_id, estilo)
+    if chave_mapa != st.session_state["chave_mapa"]:
+        st.session_state["chave_mapa"] = chave_mapa
+        st.session_state["vista_inicial"] = st.session_state["vista_atual"]
+
+    mapa = criar_mapa(tabela, estilo, st.session_state["vista_inicial"])
     resultado_mapa = st_folium(
         mapa,
         height=680,
         use_container_width=True,
         key=f"mapa_{modelo_id}_{estilo}_{st.session_state['versao_mapa']}",
-        returned_objects=["last_object_clicked_tooltip"],
+        returned_objects=["last_object_clicked_tooltip", "center", "zoom"],
     )
+
+    # Guarda a vista corrente (não altera o HTML do mapa, então não o reinicia).
+    if resultado_mapa:
+        centro, zoom = resultado_mapa.get("center"), resultado_mapa.get("zoom")
+        if isinstance(centro, dict) and centro.get("lat") is not None and isinstance(zoom, (int, float)):
+            st.session_state["vista_atual"] = {"lat": float(centro["lat"]), "lng": float(centro["lng"]), "zoom": float(zoom)}
 
     clique = resultado_mapa.get("last_object_clicked_tooltip") if resultado_mapa else None
     if clique and clique in set(tabela["Unidade"]) and clique != st.session_state["ultimo_clique_mapa"]:
