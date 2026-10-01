@@ -23,32 +23,45 @@ from branca.element import Element, MacroElement
 from jinja2 import Template
 from streamlit_folium import st_folium
 
-import historico
-from analise import (
-    carregar_regioes,
-    consolidar,
-    horas_a_frente,
-    rotulo_horario,
-    series_por_unidade,
-)
-from app_camadas import GOES_ATRIBUICAO, GOES_ZOOM_NATIVO, url_goes
-from modelos import MODELOS, TZ_BRASILIA, ErroBuscaModelo, buscar_modelo, horario_local
-from relatorio import gerar_pdf, gerar_png
-from risco_raio import (
-    CORES_NIVEL,
-    ICONES,
-    NIVEIS_RISCO,
-    ROTULOS,
-    ParametrosRisco,
-)
-from unidades import ESTACOES
-
 st.set_page_config(
     page_title="RUSBÉ | Painel Meteorológico",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="auto",  # recolhida automaticamente em telas pequenas
 )
+
+# Os módulos do projeto precisam ser todos da mesma versão. Se o app foi publicado com algum arquivo
+# desatualizado (por exemplo, só o app.py foi trocado no GitHub), o Streamlit Cloud esconde o erro real;
+# aqui mostramos qual módulo está desatualizado e o que fazer.
+try:
+    import historico
+    from analise import (
+        carregar_regioes,
+        consolidar,
+        horas_a_frente,
+        rotulo_horario,
+        series_por_unidade,
+    )
+    from app_camadas import GOES_ATRIBUICAO, GOES_ZOOM_NATIVO, url_goes
+    from modelos import MODELOS, TZ_BRASILIA, ErroBuscaModelo, buscar_modelo, horario_local
+    from relatorio import gerar_pdf, gerar_png
+    from risco_raio import (
+        CORES_NIVEL,
+        ICONES,
+        NIVEIS_RISCO,
+        ROTULOS,
+        ParametrosRisco,
+    )
+    from unidades import ESTACOES
+except ImportError as _erro_import:
+    st.error(
+        "**Arquivos do projeto de versões diferentes.** Algum módulo está desatualizado ou ausente no repositório "
+        "publicado. Envie para o GitHub **todos** os arquivos do `.zip` (em especial `analise.py`, `risco_raio.py`, "
+        "`modelos.py`, `historico.py`, `app_camadas.py`, `relatorio.py`, `unidades.py`, `config_regioes.json` e a pasta "
+        "`dados/`), confirme o commit e reinicie o app (*Manage app → Reboot*)."
+    )
+    st.code(f"{type(_erro_import).__name__}: {_erro_import}")
+    st.stop()
 
 RAIZ = Path(__file__).resolve().parent
 
