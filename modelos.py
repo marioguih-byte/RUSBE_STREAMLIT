@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -12,6 +13,8 @@ from unidades import ESTACOES
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 TIMEOUT = 25
+TENTATIVAS = 3  # tentativas em caso de falha de rede/servidor (espera 1 s, 2 s, …)
+HORIZONTE_DIAS = 3  # dias de previsão (a partir de 00:00 de hoje) para cobrir +48 h
 VARIAVEIS_HOURLY = "cape,lifted_index,convective_inhibition"
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 
@@ -85,7 +88,7 @@ def buscar_modelo(model_id: str, session: Optional[requests.Session] = None) -> 
         "latitude": lats,
         "longitude": lons,
         "hourly": VARIAVEIS_HOURLY,
-        "forecast_days": 2,
+        "forecast_days": HORIZONTE_DIAS,
         "timezone": "America/Sao_Paulo",
         "cell_selection": "nearest",
     }
@@ -93,14 +96,27 @@ def buscar_modelo(model_id: str, session: Optional[requests.Session] = None) -> 
         params["models"] = model_id
 
     cliente = session or requests.Session()
-    try:
-        resposta = cliente.get(API_URL, params=params, timeout=TIMEOUT)
-    except requests.RequestException as exc:
-        raise ErroBuscaModelo(f"Não foi possível conectar ao serviço de previsão: {exc}") from exc
-
-    if resposta.status_code != 200:
-        detalhe = resposta.text[:300].replace("\n", " ")
-        raise ErroBuscaModelo(f"O serviço retornou HTTP {resposta.status_code}: {detalhe}")
+    resposta = None
+    ultimo_erro = ""
+    for tentativa in range(1, TENTATIVAS + 1):
+        try:
+            resposta = cliente.get(API_URL, params=params, timeout=TIMEOUT)
+        except requests.RequestException as exc:
+            ultimo_erro = f"Não foi possível conectar ao serviço de previsão: {exc}"
+            resposta = None
+        else:
+            if resposta.status_code == 200:
+                break
+            detalhe = resposta.text[:300].replace("\n", " ")
+            ultimo_erro = f"O serviço retornou HTTP {resposta.status_code}: {detalhe}"
+            # Erros do cliente (4xx, exceto 429) não melhoram ao repetir.
+            if 400 <= resposta.status_code < 500 and resposta.status_code != 429:
+                raise ErroBuscaModelo(ultimo_erro)
+            resposta = None
+        if tentativa < TENTATIVAS:
+            time.sleep(tentativa)
+    if resposta is None:
+        raise ErroBuscaModelo(ultimo_erro)
 
     try:
         payload = resposta.json()
@@ -141,4 +157,5 @@ def buscar_modelo(model_id: str, session: Optional[requests.Session] = None) -> 
                 hora_referencia = tempos[indice] if indice < len(tempos) else "—"
 
     resultado["_hora_referencia"] = hora_referencia
+    resultado["_obtido_em"] = datetime.now(TZ_BRASILIA).isoformat()
     return resultado

@@ -55,4 +55,57 @@ _ESTACOES_BRUTO = [
     {"nome": "Porto Paracuru", "lat": -3.401146142, "lon": -39.01089596},
 ]
 
-ESTACOES = sorted(_ESTACOES_BRUTO, key=lambda estacao: _normalizar(estacao["nome"]))
+# UF de cada unidade (usada nos filtros e nos relatórios).
+_UF_POR_UNIDADE = {
+    "UTE Termocamaçari - UTE TCA": "BA",
+    "UTE Termobahia - UTE TBA": "BA",
+    "UTE Termoceará - UTE TCE": "CE",
+    "UTE Vale do Açu - UTE VLA": "RN",
+    "Refinaria Abreu e Lima - RNEST": "PE",
+    "Unidade de Tratamento de Gás Sul Capixaba - UTGSUL": "ES",
+    "Unidade de Tratamento de Gás de Cacimbas - UTGC": "ES",
+    "Refinaria Duque de Caxias - REDUC": "RJ",
+    "UTE Termorio - UTE TRI": "RJ",
+    "BOAVENTURA, Itaboraí-RJ": "RJ",
+    "Unidade de Tratamento de Gás de Cabiúnas - UTGCAB": "RJ",
+    "UTE Termomacaé - UTE TMA": "RJ",
+    "UTE Seropédica/Baixada Fluminense - UTE SRP/BF": "RJ",
+    "Refinaria Gabriel Passos - REGAP": "MG",
+    "UTE Ibirité - UTE IBT": "MG",
+    "UTE Juiz de Fora - UTE JF": "MG",
+    "UTE Três Lagoas - UTE TLG": "MS",
+    "Unidade de Tratamento de Gás de Caraguatatuba - UTGCA": "SP",
+    "Refinaria Presidente Bernardes - RPBC": "SP",
+    "UTE Cubatão - UTE CBT": "SP",
+    "Refinaria Henrique Lage - REVAP": "SP",
+    "Refinaria de Capuava - RECAP": "SP",
+    "Refinaria de Paulínia - REPLAN": "SP",
+    "UTE Nova Piratininga - UTE NPI": "SP",
+    "Refinaria Presidente Getúlio Vargas - REPAR": "PR",
+    "Refinaria Alberto Pasqualini - REFAP": "RS",
+    "UTE Canoas - UTE CAN": "RS",
+    "Armazém Rio de Janeiro": "RJ",
+    "CILEP - CENPES": "RJ",
+    "Porto Baia de Guanabara": "RJ",
+    "ARM Macaé - Armazém Macaé": "RJ",
+    "Porto de Imbetiba - Macaé": "RJ",
+    "Porto Açu": "RJ",
+    "Porto Aratu": "BA",
+    "Porto TMIB": "SE",
+    "Porto Belém": "PA",
+    "Porto Valença": "BA",
+    "Porto Guamaré": "RN",
+    "Porto Mucuripe": "CE",
+    "Porto Paracuru": "CE",
+}
+
+ESTACOES = sorted(
+    ({**estacao, "uf": _UF_POR_UNIDADE[estacao["nome"]]} for estacao in _ESTACOES_BRUTO),
+    key=lambda estacao: _normalizar(estacao["nome"]),
+)
+UFS = sorted({estacao["uf"] for estacao in ESTACOES})
+
+
+def sigla(nome: str) -> str:
+    """Sigla curta da unidade (trecho após o último ' - ', ou o próprio nome)."""
+    return nome.rsplit(" - ", 1)[-1] if " - " in nome else nome
