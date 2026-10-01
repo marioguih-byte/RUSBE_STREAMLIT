@@ -316,6 +316,8 @@ def _html_popup(linha: pd.Series, cor: str) -> str:
             f"<div style='display:flex;justify-content:space-between;'><span>Pico 24 h</span>"
             f"<b>{linha['Pico 24 h']:.0f} · {escape(str(linha['Hora do pico']))}</b></div>"
         )
+    if linha.get("Ajuste chuva") == "reduzido":
+        extras += "<div style='color:#7b8794;'>☂ Sem chuva prevista nas próximas horas: score reduzido</div>"
     return f"""
     <div style="font-family:'Segoe UI',Arial,sans-serif; min-width:240px; overflow:hidden; border-radius:12px;">
         <div style="background:{cor}; color:{_cor_texto(cor)}; padding:9px 12px;">
@@ -1159,7 +1161,7 @@ def main() -> None:
             colunas = ["Unidade", "UF", "Risco", "Score", "Tendência", "Δ 6 h", "Pico 24 h", "Hora do pico",
                        "CAPE (J/kg)", "Lifted Index (°C)", "CIN (J/kg)"]
             if extras_disponiveis:
-                colunas += ["Precip. (mm/h)", "Rajada (km/h)", "Gradiente 850–500 (°C)", "Nível 0 °C (m)"]
+                colunas += ["Ajuste chuva", "Precip. (mm/h)", "Rajada (km/h)", "Gradiente 850–500 (°C)", "Nível 0 °C (m)"]
             exibicao = tabela[colunas].sort_values("Score", ascending=False, na_position="last")
 
             def colorir_risco(valor: str) -> str:

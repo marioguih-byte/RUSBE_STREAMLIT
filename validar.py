@@ -157,7 +157,9 @@ def testes_ampliados() -> None:
     assert janela_frente([0, 0, 2, 0, 0, 0], 2) == [2, 2, 2, 0, 0, 0] and janela_frente([None, None], 1) == [None, None]
     gate = carregar_gate()
     assert {"CE", "RN", "PE", "SE", "BA"} <= set(gate.ufs) and "RJ" not in gate.ufs and gate.multiplicador == 0.5
-    assert multiplicador_do_gate(0.0, "CE", gate) == 0.5 and multiplicador_do_gate(0.5, "CE", gate) is None
+    assert gate.limiar_mm_h == 1.0  # garoa (< 1 mm/h) não conta como chuva prevista
+    assert multiplicador_do_gate(0.0, "CE", gate) == 0.5 and multiplicador_do_gate(0.5, "CE", gate) == 0.5
+    assert multiplicador_do_gate(1.5, "CE", gate) is None
     assert multiplicador_do_gate(None, "CE", gate) is None and multiplicador_do_gate(0.0, "RJ", gate) is None
     assert calcular_risco(1500, -3, -30, multiplicador_gate=0.5)[0] == 0.5 * (22 + 22 + 10)
     seco = _dados_sinteticos()
@@ -167,10 +169,18 @@ def testes_ampliados() -> None:
     chuvoso = {n: ({**s, "precip": [1.0] * len(s["tempos"])} if isinstance(s, dict) else s) for n, s in seco.items()}
     ce = next(e["nome"] for e in ESTACOES if e["uf"] == "CE")
     rj = next(e["nome"] for e in ESTACOES if e["uf"] == "RJ")
+    from analise import gate_relativo
+
+    assert gate_relativo(seco[ce_nome_g := next(e["nome"] for e in ESTACOES if e["uf"] == "CE")], "CE", gate)[0] is True
+    assert gate_relativo(chuvoso[ce_nome_g], "CE", gate)[0] is False
+    assert gate_relativo(seco[ce_nome_g], "RJ", gate)[0] is None
     s_seco = series_por_unidade(seco, ParametrosRisco(), None, gate)
     s_chuva = series_por_unidade(chuvoso, ParametrosRisco(), None, gate)
     s_sem = series_por_unidade(seco, ParametrosRisco(), None, None)
     assert s_seco[rj]["rel"] == s_sem[rj]["rel"]  # fora do Nordeste o gate não age
+    tab_seca = consolidar(seco, s_seco, 27)
+    assert tab_seca.loc[tab_seca["Unidade"] == ce, "Ajuste chuva"].iloc[0] == "reduzido"
+    assert tab_seca.loc[tab_seca["Unidade"] == rj, "Ajuste chuva"].iloc[0] == ""
     assert s_chuva[ce]["rel"] == s_sem[ce]["rel"]  # com chuva prevista, o score fica igual
     k = 27
     assert abs(s_seco[ce]["rel"][k] - 0.5 * s_sem[ce]["rel"][k]) <= 0.06  # sem chuva: metade

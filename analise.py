@@ -144,6 +144,16 @@ def scores_relativos(
     ]
 
 
+def gate_relativo(serie: dict[str, Any], uf: str, gate: Optional[GatePrecipitacao]) -> list[Optional[bool]]:
+    """Por hora (0 = agora): ``True`` = score reduzido por falta de chuva prevista; ``False`` = chuva prevista;
+    ``None`` = o gate não se aplica (UF fora da lista ou sem dado de precipitação)."""
+    inicio, n = serie.get("idx_atual", 0), len(serie.get("tempos", []))
+    if not (gate and uf in gate.ufs and "precip" in serie):
+        return [None] * max(0, n - inicio)
+    chuva = janela_frente(serie["precip"], gate.janela_h)
+    return [None if chuva[i] is None else chuva[i] < gate.limiar_mm_h for i in range(inicio, n)]
+
+
 def explicar_hora(
     serie: dict[str, Any],
     deslocamento: int,
@@ -215,7 +225,8 @@ def series_por_unidade(
                 parametros_da_unidade(parametros, estacao["uf"], regioes),
                 estacao["uf"],
                 gate,
-            )
+            ),
+            "gate": gate_relativo(dados.get(estacao["nome"], {}), estacao["uf"], gate),
         }
         for estacao in ESTACOES
     }
@@ -266,6 +277,8 @@ def consolidar(
         else:
             nivel = classificar_risco(score)[0]
 
+        flags = info.get("gate", [])
+        ajuste = "reduzido" if 0 <= deslocamento < len(flags) and flags[deslocamento] is True else ""
         tend = tendencia(rel, deslocamento)
         pico_hora = rotulo_horario({nome: serie}, tend["desloc_pico"]) if tend["desloc_pico"] is not None else "—"
 
@@ -283,6 +296,7 @@ def consolidar(
                 "Δ 6 h": tend["delta6h"],
                 "Pico 24 h": tend["pico"],
                 "Hora do pico": pico_hora,
+                "Ajuste chuva": ajuste,
                 "Precip. (mm/h)": extras.get("precip"),
                 "Rajada (km/h)": extras.get("rajada"),
                 "Gradiente 850–500 (°C)": extras.get("gradiente"),
