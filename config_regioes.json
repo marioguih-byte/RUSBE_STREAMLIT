@@ -1,0 +1,54 @@
+{
+ "BA": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "CE": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "ES": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "MG": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "MS": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "PA": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "PE": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "PR": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "RJ": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "RN": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "RS": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "SE": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ },
+ "SP": {
+  "fator_cape": 1.0,
+  "fator_li": 1.0
+ }
+}

@@ -13,11 +13,21 @@
 
 - [x] Seletor de hora (+0 h a +48 h) e tendência ▲▼▬ com pico em 24 h.
 - [x] Gráficos de score (com faixas de risco), CAPE, LI e CIN no detalhe da unidade.
-- [x] Filtros por nível, UF e nome; ordenação "Vai piorar".
-- [x] Consenso entre modelos (média, mín.–máx. e uma linha por modelo).
-- [x] Calibração da heurística (CAPE, LI, peso do CIN) e camada de raios observados via CSV.
+- [x] Busca por nome e ordenação por nome ou maior risco.
+- [x] Calibração da heurística (CAPE, LI, peso do CIN).
 - [x] Tentativas na API, último dado válido e indicador de idade dos dados; mapa em fragmento.
 - [x] Alertas por e-mail/webhook (`alertas.py`) e agendamento no GitHub Actions.
 - [x] Exportação em CSV, PNG e PDF.
-- [x] Paleta para daltonismo, score dentro das bolinhas e altura do mapa ajustável.
+- [x] Score dentro das bolinhas.
+- [x] Removidos a pedido: "Vai piorar", consenso entre modelos, paleta para daltonismo, altura do mapa, raios observados e filtros.
+
+## Fase 3
+
+- [x] Heurística ampliada opcional (precipitação, rajada, gradiente 850–500 hPa, nível de 0 °C), com consulta extra tolerante a falhas.
+- [x] Ajuste por região (UF) com tabela editável e `config_regioes.json`.
+- [x] Histórico das previsões em SQLite, com painel, exportação e linha de comando.
+- [x] Divisas estaduais e camada de topos de nuvem (GOES-East via NASA GIBS).
+- [x] `python validar.py --online [--modelos]`: relatório de sanidade com dados reais.
+- [ ] Rodar `validar.py --online` no ambiente de produção e conferir a camada GOES (o ambiente de desenvolvimento não alcança a Open-Meteo nem a NASA GIBS).
+- [ ] Calibrar os pesos da heurística ampliada e os fatores por UF com observações (o histórico já guarda o necessário).
 

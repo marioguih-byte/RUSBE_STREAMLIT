@@ -15,7 +15,7 @@ from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Polygon as PoligonoMpl  # noqa: E402
 
-from risco_raio import ROTULOS, cores_da_paleta  # noqa: E402
+from risco_raio import CORES_NIVEL, ROTULOS  # noqa: E402
 from unidades import sigla  # noqa: E402
 
 CONTORNO = Path(__file__).resolve().parent / "dados" / "brasil_contorno.geojson"
@@ -35,8 +35,8 @@ def _texto_sobre(cor_hex: str) -> str:
     return "#111111" if 0.299 * r + 0.587 * g + 0.114 * b > 150 else "#ffffff"
 
 
-def _desenhar_mapa(ax: plt.Axes, tabela: pd.DataFrame, paleta: str) -> None:
-    cores = cores_da_paleta(paleta)
+def _desenhar_mapa(ax: plt.Axes, tabela: pd.DataFrame) -> None:
+    cores = CORES_NIVEL
     for anel in _poligonos():
         ax.add_patch(PoligonoMpl(anel, closed=True, facecolor="#e6e9ee", edgecolor="#1d4e89", linewidth=1.1, zorder=1))
     ordenada = tabela.assign(_s=tabela["Score"].fillna(-1)).sort_values("_s")
@@ -69,10 +69,10 @@ def _desenhar_mapa(ax: plt.Axes, tabela: pd.DataFrame, paleta: str) -> None:
     ax.legend(handles=manipuladores, title="Risco de raios", loc="lower left", frameon=True, fontsize=8, title_fontsize=8)
 
 
-def _figura_mapa(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: str) -> plt.Figure:
+def _figura_mapa(tabela: pd.DataFrame, titulo: str, subtitulo: str) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(8.27, 8.8), dpi=150)
     fig.patch.set_facecolor(FUNDO)
-    _desenhar_mapa(ax, tabela, paleta)
+    _desenhar_mapa(ax, tabela)
     fig.text(0.05, 0.96, titulo, fontsize=15, fontweight="bold", color=TEXTO, va="top")
     fig.text(0.05, 0.925, subtitulo, fontsize=9, color=SECUNDARIO, va="top")
     fig.text(0.05, 0.02, "Score heurístico (CAPE, Lifted Index, CIN). Não substitui alertas oficiais. Dados: Open-Meteo.",
@@ -81,8 +81,8 @@ def _figura_mapa(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: str)
     return fig
 
 
-def _figura_tabela(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: str, pagina: pd.DataFrame, numero: int, total: int) -> plt.Figure:
-    cores = cores_da_paleta(paleta)
+def _figura_tabela(titulo: str, subtitulo: str, pagina: pd.DataFrame, numero: int, total: int) -> plt.Figure:
+    cores = CORES_NIVEL
     fig = plt.figure(figsize=(8.27, 11.69), dpi=150)
     fig.patch.set_facecolor(FUNDO)
     fig.text(0.05, 0.965, titulo, fontsize=14, fontweight="bold", color=TEXTO, va="top")
@@ -117,25 +117,25 @@ def _figura_tabela(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: st
     return fig
 
 
-def gerar_png(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: str = "padrao") -> bytes:
-    fig = _figura_mapa(tabela, titulo, subtitulo, paleta)
+def gerar_png(tabela: pd.DataFrame, titulo: str, subtitulo: str) -> bytes:
+    fig = _figura_mapa(tabela, titulo, subtitulo)
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", facecolor=fig.get_facecolor())
     plt.close(fig)
     return buffer.getvalue()
 
 
-def gerar_pdf(tabela: pd.DataFrame, titulo: str, subtitulo: str, paleta: str = "padrao", por_pagina: int = 32) -> bytes:
+def gerar_pdf(tabela: pd.DataFrame, titulo: str, subtitulo: str, por_pagina: int = 32) -> bytes:
     """PDF com o mapa na 1ª página e o ranking das unidades (maior risco primeiro) nas seguintes."""
     ranking = tabela.assign(_s=tabela["Score"].fillna(-1)).sort_values(["_s", "Unidade"], ascending=[False, True])
     paginas = [ranking.iloc[i : i + por_pagina] for i in range(0, len(ranking), por_pagina)] or [ranking]
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
-        fig = _figura_mapa(tabela, titulo, subtitulo, paleta)
+        fig = _figura_mapa(tabela, titulo, subtitulo)
         pdf.savefig(fig, facecolor=fig.get_facecolor())
         plt.close(fig)
         for numero, pagina in enumerate(paginas, start=1):
-            fig = _figura_tabela(tabela, titulo, subtitulo, paleta, pagina, numero, len(paginas))
+            fig = _figura_tabela(titulo, subtitulo, pagina, numero, len(paginas))
             pdf.savefig(fig, facecolor=fig.get_facecolor())
             plt.close(fig)
     return buffer.getvalue()

@@ -1,15 +1,15 @@
 """RUSBÉ em Streamlit.
 
 Painel operacional com barra lateral escura, mapa claro (OpenStreetMap) travado
-no Brasil, seletor de hora da previsão, tendência por unidade, consenso entre
-modelos, filtros, exportação e detalhe horário com gráficos para cada unidade.
+no Brasil, seletor de hora da previsão, tendência por unidade, calibração da
+heurística, exportação e detalhe horário com gráficos para cada unidade.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -23,25 +23,25 @@ from branca.element import Element, MacroElement
 from jinja2 import Template
 from streamlit_folium import st_folium
 
+import historico
 from analise import (
+    carregar_regioes,
     consolidar,
-    contar_raios,
-    filtrar_janela,
     horas_a_frente,
-    ler_raios,
     rotulo_horario,
     series_por_unidade,
 )
+from app_camadas import GOES_ATRIBUICAO, GOES_ZOOM_NATIVO, url_goes
 from modelos import MODELOS, TZ_BRASILIA, ErroBuscaModelo, buscar_modelo, horario_local
 from relatorio import gerar_pdf, gerar_png
 from risco_raio import (
+    CORES_NIVEL,
     ICONES,
     NIVEIS_RISCO,
     ROTULOS,
     ParametrosRisco,
-    cores_da_paleta,
 )
-from unidades import ESTACOES, UFS
+from unidades import ESTACOES
 
 st.set_page_config(
     page_title="RUSBÉ | Painel Meteorológico",
@@ -68,8 +68,9 @@ LIMITES_BRASIL = [[-33.75, -74.0], [5.3, -34.8]]
 # Limite de navegação (folga pequena em volta do Brasil).
 LIMITES_NAVEGACAO = {"min_lat": -36.0, "min_lon": -77.0, "max_lat": 8.0, "max_lon": -31.0}
 
-CONSENSO_PADRAO = ["ecmwf_ifs025", "gfs_seamless", "icon_seamless"]
 HORIZONTE_MAX_H = 48
+ALTURA_MAPA = 680
+
 CACHE_HORARIO_LOCAL = "america_sao_paulo_v3"
 ESPERA_APOS_FALHA_S = 60  # após uma falha, usa o último dado válido por este tempo sem tentar de novo
 
@@ -83,20 +84,6 @@ def _buscar_modelo_cache(modelo_id: str, versao_cache: str) -> dict[str, Any]:
     return buscar_modelo(modelo_id)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def _buscar_varios_cache(modelos: tuple[str, ...], versao_cache: str) -> dict[str, dict[str, Any]]:
-    """Consulta vários modelos em paralelo; falhas individuais viram {'_erro': mensagem}."""
-
-    def um(modelo_id: str) -> dict[str, Any]:
-        try:
-            return buscar_modelo(modelo_id)
-        except ErroBuscaModelo as erro:
-            return {"_erro": str(erro)}
-
-    with ThreadPoolExecutor(max_workers=max(1, len(modelos))) as pool:
-        return dict(zip(modelos, pool.map(um, modelos)))
-
-
 @st.cache_resource(show_spinner=False)
 def _estado_dados() -> dict[str, dict[str, Any]]:
     """Último dado válido e instante da última falha, por modelo (compartilhado entre sessões)."""
@@ -105,7 +92,6 @@ def _estado_dados() -> dict[str, dict[str, Any]]:
 
 def limpar_cache_dados() -> None:
     _buscar_modelo_cache.clear()
-    _buscar_varios_cache.clear()
     _estado_dados()["falha"].clear()
 
 
@@ -150,6 +136,9 @@ def _inicializar_estado() -> None:
         "ultimo_clique_mapa": None,
         "versao_mapa": 0,
         "relatorio": None,
+        "regioes_v": 0,
+        "ampliada": False,
+        "peso_extras": 1.0,
         "fator_cape": 1.0,
         "fator_li": 1.0,
         "peso_cin": 1.0,
@@ -274,13 +263,13 @@ class AjusteBrasil(MacroElement):
         self.limites = json.dumps(limites)
 
 
-def _legenda_mapa(cores: dict[str, str], rotulo_hora: str, fonte: str, tem_raios: bool) -> str:
+def _legenda_mapa(cores: dict[str, str], rotulo_hora: str, fonte: str, goes: bool = False) -> str:
     itens = "".join(
         f"<div class='rl-item'><span class='rl-dot' style='background:{cores[nivel]}'></span>{nivel}</div>"
         for _, nivel, _ in NIVEIS_RISCO[::-1]
     )
-    if tem_raios:
-        itens += "<div class='rl-item'><span class='rl-dot rl-raio'></span>Raio observado</div>"
+    if goes:
+        itens += "<div class='rl-sub' style='margin:4px 0 2px'>☁ Nuvens: GOES-East IR (cores quentes/frias = topos mais altos)</div>"
     return f"""
     <style>
       .leaflet-tooltip {{ font: 600 12px 'Segoe UI', Arial, sans-serif; color:#1f2933; border:0;
@@ -302,14 +291,13 @@ def _legenda_mapa(cores: dict[str, str], rotulo_hora: str, fonte: str, tem_raios
       .rusbe-legenda .rl-sub {{ color:#7b8794; font-size:10.5px; margin:-2px 0 4px; }}
       .rl-item {{ display:flex; align-items:center; gap:7px; margin:3px 0; }}
       .rl-dot {{ width:11px; height:11px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 1px rgba(15,23,42,.25); }}
-      .rl-raio {{ background:#7c3aed; width:7px; height:7px; margin:0 2px; }}
     </style>
     <div class="rusbe-legenda"><div class="rl-titulo">Risco de raios</div>
       <div class="rl-sub">{escape(rotulo_hora)} · {escape(fonte)}</div>{itens}</div>
     """
 
 
-def _html_popup(linha: pd.Series, cor: str, mostra_raios: bool, raio_km: float) -> str:
+def _html_popup(linha: pd.Series, cor: str) -> str:
     score = linha["Score"]
     score_txt = "—" if pd.isna(score) else f"{score:.1f}/100"
     seta = f" {linha['Tendência']}" if linha["Tendência"] else ""
@@ -318,16 +306,6 @@ def _html_popup(linha: pd.Series, cor: str, mostra_raios: bool, raio_km: float) 
         extras += (
             f"<div style='display:flex;justify-content:space-between;'><span>Pico 24 h</span>"
             f"<b>{linha['Pico 24 h']:.0f} · {escape(str(linha['Hora do pico']))}</b></div>"
-        )
-    if linha["Modelos"] > 0:
-        extras += (
-            f"<div style='display:flex;justify-content:space-between;'><span>Consenso ({int(linha['Modelos'])} modelos)</span>"
-            f"<b>{_numero(linha['Score mín.'])}–{_numero(linha['Score máx.'])}</b></div>"
-        )
-    if mostra_raios and not pd.isna(linha.get("Raios obs.")):
-        extras += (
-            f"<div style='display:flex;justify-content:space-between;'><span>Raios obs. ({raio_km:.0f} km)</span>"
-            f"<b>{int(linha['Raios obs.'])}</b></div>"
         )
     return f"""
     <div style="font-family:'Segoe UI',Arial,sans-serif; min-width:240px; overflow:hidden; border-radius:12px;">
@@ -353,8 +331,9 @@ def criar_mapa(
     mostrar_score: bool,
     rotulo_hora: str,
     fonte: str,
-    raios: Optional[pd.DataFrame] = None,
-    raio_km: float = 25.0,
+    divisas: bool = False,
+    goes: bool = False,
+    goes_opacidade: float = 0.6,
 ) -> folium.Map:
     """Cria o mapa Folium travado no Brasil, com marcadores clicáveis."""
     configuracao = TILES[estilo]
@@ -374,6 +353,19 @@ def criar_mapa(
         **LIMITES_NAVEGACAO,
     )
 
+    if goes:
+        # Abaixo do véu, do contorno e dos marcadores. Se a imagem não carregar, o mapa segue normal.
+        folium.TileLayer(
+            tiles=url_goes(),
+            attr=GOES_ATRIBUICAO,
+            name="Topos de nuvem (GOES-East)",
+            overlay=True,
+            control=False,
+            opacity=goes_opacidade,
+            max_native_zoom=GOES_ZOOM_NATIVO,
+            max_zoom=13,
+        ).add_to(mapa)
+
     # Véu suave fora do Brasil + contorno do país.
     veu = {"fillColor": "#f4f6f8", "fillOpacity": 0.62} if estilo == "OpenStreetMap" else {"fillColor": "#0b1220", "fillOpacity": 0.5}
     folium.GeoJson(
@@ -389,15 +381,18 @@ def criar_mapa(
         interactive=False,
     ).add_to(mapa)
 
-    tem_raios = raios is not None and not raios.empty
-    if tem_raios:
-        amostra = raios if len(raios) <= 4000 else raios.sample(4000, random_state=0)
-        grupo = folium.FeatureGroup(name="Raios observados", control=False)
-        for lat, lon in zip(amostra["lat"], amostra["lon"]):
-            folium.CircleMarker(
-                [lat, lon], radius=2.5, weight=0, fill=True, fill_color="#7c3aed", fill_opacity=0.7, interactive=False
-            ).add_to(grupo)
-        grupo.add_to(mapa)
+    if divisas:
+        folium.GeoJson(
+            carregar_geojson("brasil_estados.geojson"),
+            name="Divisas estaduais",
+            style_function=lambda _f, g=goes: {
+                "fill": False,
+                "color": "#ffffff" if g else "#6b7a8c",
+                "weight": 1,
+                "opacity": 0.85 if g else 0.6,
+            },
+            interactive=False,
+        ).add_to(mapa)
 
     for _, linha in tabela.iterrows():
         score = linha["Score"]
@@ -420,13 +415,13 @@ def criar_mapa(
             location=[linha["Latitude"], linha["Longitude"]],
             icon=icone,
             tooltip=linha["Unidade"],
-            popup=folium.Popup(_html_popup(linha, cor, tem_raios, raio_km), max_width=320, auto_pan=False),
+            popup=folium.Popup(_html_popup(linha, cor), max_width=320, auto_pan=False),
             # Risco mais alto sempre por cima quando há sobreposição.
             z_index_offset=0 if pd.isna(score) else int(score * 10),
         ).add_to(mapa)
 
     mapa.add_child(AjusteBrasil(LIMITES_BRASIL))
-    mapa.get_root().html.add_child(Element(_legenda_mapa(cores, rotulo_hora, fonte, tem_raios)))
+    mapa.get_root().html.add_child(Element(_legenda_mapa(cores, rotulo_hora, fonte, goes)))
     return mapa
 
 
@@ -462,18 +457,7 @@ def _dados_grafico(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
-def _scores_por_modelo(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
-    linhas = []
-    for modelo_id, scores in ctx["series"][nome]["por_modelo"].items():
-        d = ctx["dados_consenso"][modelo_id].get(nome, {})
-        inicio, tempos = d.get("idx_atual", 0), d.get("tempos", [])
-        for k, valor in enumerate(scores[: HORIZONTE_MAX_H + 1]):
-            if inicio + k < len(tempos):
-                linhas.append({"tempo": pd.to_datetime(tempos[inicio + k]), "Modelo": MODELOS[modelo_id][0], "Score": valor})
-    return pd.DataFrame(linhas)
-
-
-def _grafico_score(df: pd.DataFrame, df_modelos: pd.DataFrame, cores: dict[str, str], tempo_sel: pd.Timestamp) -> alt.Chart:
+def _grafico_score(df: pd.DataFrame, cores: dict[str, str], tempo_sel: pd.Timestamp) -> alt.Chart:
     limites = [0] + [min(limite, 100) for limite, _, _ in NIVEIS_RISCO]
     bandas = pd.DataFrame(
         [{"y0": limites[i], "y1": limites[i + 1], "Nível": rotulo} for i, (_, rotulo, _) in enumerate(NIVEIS_RISCO)]
@@ -489,12 +473,6 @@ def _grafico_score(df: pd.DataFrame, df_modelos: pd.DataFrame, cores: dict[str, 
             color=alt.Color("Nível:N", scale=alt.Scale(domain=ROTULOS, range=[cores[r] for r in ROTULOS]), legend=None),
         )
     ]
-    if not df_modelos.empty:
-        camadas.append(
-            alt.Chart(df_modelos)
-            .mark_line(strokeWidth=1.6, opacity=0.85, interpolate="monotone")
-            .encode(x=eixo_x, y=eixo_y, color=alt.Color("Modelo:N"), tooltip=["Modelo:N", "tempo:T", alt.Tooltip("Score:Q", format=".1f")])
-        )
     camadas.append(
         alt.Chart(df)
         .mark_line(strokeWidth=3, color="#f2f4f8", interpolate="monotone")
@@ -550,9 +528,6 @@ def _tabela_horaria(nome: str, ctx: dict[str, Any]) -> pd.DataFrame:
             "Score": score,
             "Risco": nivel,
         }
-        if info["por_modelo"]:
-            vals = [s[k] for s in info["por_modelo"].values() if k < len(s) and s[k] is not None]
-            linha["Mín.–máx."] = f"{min(vals):.0f}–{max(vals):.0f}" if vals else "—"
         linhas.append(linha)
     return pd.DataFrame(linhas)
 
@@ -564,8 +539,7 @@ def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
     def janela() -> None:
         cores = ctx["cores"]
         modelo_nome, origem, frequencia = MODELOS[ctx["modelo_id"]]
-        fonte = ctx["fonte"]
-        st.caption(f"Valores brutos: {modelo_nome} · Origem: {origem} · Atualização: {frequencia} · Score: {fonte}")
+        st.caption(f"Modelo: {modelo_nome} · Origem: {origem} · Atualização: {frequencia}")
 
         linha_t = ctx["tabela"].loc[ctx["tabela"]["Unidade"] == nome]
         if linha_t.empty or not ctx["series"][nome]["rel"]:
@@ -590,23 +564,22 @@ def abrir_detalhamento(nome: str, ctx: dict[str, Any]) -> None:
                 f"<div class='dlg-card'><span>Tendência (6 h)</span><b>{seta_txt}{delta_txt}</b>"
                 f"<small>pico 24 h: {pico_txt} · {hora_pico}</small></div>"
             )
-            if agora["Modelos"] > 0:
-                cartoes.append(
-                    f"<div class='dlg-card'><span>Consenso</span><b>{_numero(agora['Score mín.'])}–{_numero(agora['Score máx.'])}</b><small>{int(agora['Modelos'])} modelos</small></div>"
-                )
-            if ctx["raios"] is not None and not pd.isna(agora.get("Raios obs.")):
-                cartoes.append(
-                    f"<div class='dlg-card'><span>Raios obs.</span><b>{int(agora['Raios obs.'])}</b><small>em {ctx['raio_km']:.0f} km</small></div>"
-                )
+            if ctx.get("ampliada"):
+                extras_cartoes = [
+                    ("Precipitação", _numero(agora["Precip. (mm/h)"], 1), "mm/h"),
+                    ("Rajada", _numero(agora["Rajada (km/h)"]), "km/h"),
+                    ("T850 − T500", _numero(agora["Gradiente 850–500 (°C)"], 1), "°C"),
+                    ("Nível de 0 °C", _numero(agora["Nível 0 °C (m)"]), "m"),
+                ]
+                cartoes += [f"<div class='dlg-card'><span>{n}</span><b>{v}</b><small>{u}</small></div>" for n, v, u in extras_cartoes]
             st.markdown(f"<div class='dlg-resumo'>{''.join(cartoes)}</div>", unsafe_allow_html=True)
 
             df = _dados_grafico(nome, ctx)
             tempo_sel = df["tempo"].iloc[min(ctx["deslocamento"], len(df) - 1)] if not df.empty else pd.Timestamp.now()
-            df_modelos = _scores_por_modelo(nome, ctx) if ctx["series"][nome]["por_modelo"] else pd.DataFrame()
 
             st.markdown("#### Score nas próximas 48 horas")
             st.caption("Linha branca: score usado no mapa. Faixas coloridas: níveis de risco. Linha tracejada: hora selecionada.")
-            st.altair_chart(_grafico_score(df, df_modelos, cores, tempo_sel), theme=None)
+            st.altair_chart(_grafico_score(df, cores, tempo_sel), theme=None)
 
             st.markdown("#### Variáveis")
             c1, c2, c3 = st.columns(3)
@@ -725,13 +698,29 @@ def _restaurar_calibracao() -> None:
     st.session_state["fator_cape"] = 1.0
     st.session_state["fator_li"] = 1.0
     st.session_state["peso_cin"] = 1.0
+    st.session_state["ampliada"] = False
+    st.session_state["peso_extras"] = 1.0
+    st.session_state["regioes_v"] += 1  # novo editor da tabela por UF, com os valores do arquivo
 
 
-@st.cache_data(show_spinner=False)
-def _ler_raios_cache(conteudo: bytes) -> pd.DataFrame:
-    import io
+def _tabela_regioes_inicial() -> pd.DataFrame:
+    fatores = carregar_regioes()
+    return pd.DataFrame(
+        [{"UF": uf, "CAPE (×)": fc, "LI (×)": fl} for uf, (fc, fl) in sorted(fatores.items())]
+    )
 
-    return ler_raios(io.BytesIO(conteudo))
+
+def _regioes_do_editor(editado: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    """Converte a tabela editada em {UF: (fator CAPE, fator LI)}; valores inválidos voltam a 1,0."""
+    saida: dict[str, tuple[float, float]] = {}
+    for _, linha in editado.iterrows():
+        try:
+            fc = float(linha["CAPE (×)"])
+            fl = float(linha["LI (×)"])
+        except (TypeError, ValueError):
+            fc = fl = 1.0
+        saida[str(linha["UF"])] = (fc if fc > 0 else 1.0, fl if fl > 0 else 1.0)
+    return saida
 
 
 def serie_longa(dados: dict[str, Any], series: dict[str, dict[str, Any]]) -> pd.DataFrame:
@@ -756,8 +745,10 @@ def serie_longa(dados: dict[str, Any], series: dict[str, dict[str, Any]]) -> pd.
                 "CIN (J/kg)": serie["cin"][i] if i < len(serie.get("cin", [])) else None,
                 "Score": score,
             }
-            for modelo_id, scores in info["por_modelo"].items():
-                linha[f"Score {modelo_id}"] = scores[k] if k < len(scores) else None
+            for campo, rotulo in (("precip", "Precip. (mm/h)"), ("rajada", "Rajada (km/h)"), ("nivel0", "Nível 0 °C (m)"),
+                                  ("t850", "T850 (°C)"), ("t500", "T500 (°C)")):
+                if campo in serie:
+                    linha[rotulo] = serie[campo][i] if i < len(serie[campo]) else None
             linhas.append(linha)
     return pd.DataFrame(linhas)
 
@@ -771,29 +762,113 @@ def _csv_br(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
 
 
+def painel_historico(
+    modelo_id: str,
+    parametros: ParametrosRisco,
+    regioes: dict[str, tuple[float, float]],
+    unidades: list[str],
+    cores: dict[str, str],
+) -> None:
+    """Score realizado e evolução das previsões, a partir do SQLite local."""
+    info = historico.status()
+    if not info["ativo"]:
+        st.info("O histórico está desligado (variável RUSBE_HISTORICO=desligado).")
+        return
+    if info["execucoes"] == 0:
+        st.info(
+            "Ainda não há nada gravado. O painel grava uma execução por modelo a cada hora em que é aberto; "
+            "para gravar sem ninguém abrir o painel, agende `python historico.py registrar` (veja o README)."
+        )
+        return
+
+    linhas_txt = f"{info['linhas']:,}".replace(",", ".")
+    mb_txt = f"{info['tamanho_mb']}".replace(".", ",")
+    n = info["execucoes"]
+    st.markdown(
+        f"<div class='nota-tab'>{n} {'execução gravada' if n == 1 else 'execuções gravadas'} ({linhas_txt} linhas, {mb_txt} MB), "
+        f"de {info['primeira']} a {info['ultima']} · modelos: {', '.join(info['modelos'])}. "
+        f"Arquivo: <code>{escape(str(info['caminho']))}</code></div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns([3, 1])
+    unidade = c1.selectbox("Unidade", unidades, key="hist_unidade")
+    dias = c2.selectbox("Período", [1, 3, 7, 14, 30], index=2, key="hist_dias", format_func=lambda d: f"{d} dia(s)")
+
+    realizado = historico.serie_realizada(unidade, modelo_id, dias, parametros, regioes)
+    st.markdown("##### Score realizado (previsão de 0 h de cada execução)")
+    if realizado.empty:
+        st.caption("Sem registros deste modelo para a unidade e o período escolhidos.")
+    else:
+        limites = [0] + [min(limite, 100) for limite, _, _ in NIVEIS_RISCO]
+        bandas = pd.DataFrame([{"y0": limites[i], "y1": limites[i + 1], "Nível": r} for i, (_, r, _) in enumerate(NIVEIS_RISCO)])
+        faixa = (
+            alt.Chart(bandas).mark_rect(opacity=0.17)
+            .encode(
+                y=alt.Y("y0:Q", scale=alt.Scale(domain=[0, 100]), title="Score"), y2="y1:Q",
+                color=alt.Color("Nível:N", scale=alt.Scale(domain=ROTULOS, range=[cores[r] for r in ROTULOS]), legend=None),
+            )
+        )
+        linha = (
+            alt.Chart(realizado).mark_line(point=True, strokeWidth=2.5, color="#f2f4f8", interpolate="monotone")
+            .encode(x=alt.X("tempo:T", title=None, axis=alt.Axis(format="%d/%m %Hh", labelAngle=0)),
+                    y=alt.Y("score:Q", scale=alt.Scale(domain=[0, 100])),
+                    tooltip=["tempo:T", alt.Tooltip("score:Q", format=".1f"), alt.Tooltip("cape:Q", title="CAPE", format=".0f"),
+                             alt.Tooltip("li:Q", title="LI", format=".1f")])
+        )
+        st.altair_chart(_tema_grafico(alt.layer(faixa, linha).properties(height=220, width="container")), theme=None)
+
+    validos = historico.horarios_com_revisoes(unidade, modelo_id, dias)
+    st.markdown("##### Como a previsão para um horário mudou entre as execuções")
+    if not validos:
+        st.caption("Ainda não há horários com 2 ou mais execuções gravadas para esta unidade.")
+    else:
+        valido = st.selectbox("Horário previsto", validos, key="hist_valido", format_func=lambda v: pd.to_datetime(v).strftime("%d/%m %H:%M"))
+        evolucao = historico.evolucao_previsao(unidade, modelo_id, valido, parametros, regioes)
+        grafico = (
+            alt.Chart(evolucao).mark_line(point=True, strokeWidth=2.5, color="#e0b400")
+            .encode(x=alt.X("execucao_t:T", title="Execução do modelo", axis=alt.Axis(format="%d/%m %Hh", labelAngle=0)),
+                    y=alt.Y("score:Q", scale=alt.Scale(domain=[0, 100]), title="Score previsto"),
+                    tooltip=[alt.Tooltip("execucao_t:T", title="Execução"), alt.Tooltip("horas:Q", title="Horas à frente"),
+                             alt.Tooltip("score:Q", format=".1f")])
+        )
+        st.altair_chart(_tema_grafico(grafico.properties(height=200, width="container")), theme=None)
+
+    buffer = io.StringIO()
+    historico.exportar_csv(buffer, modelo_id, parametros, regioes, dias=dias)
+    st.download_button(
+        "Baixar histórico deste modelo (CSV)",
+        buffer.getvalue().encode("utf-8-sig"),
+        file_name=f"rusbe_historico_{modelo_id}.csv",
+        mime="text/csv",
+        on_click="ignore",
+        help="Variáveis brutas e score de todas as unidades e execuções do período, para calibrar com observações.",
+    )
+
+
 @st.fragment
-def secao_mapa(tabela_vis: pd.DataFrame, ctx: dict[str, Any], estilo: str, mostrar_score: bool, altura: int) -> None:
+def secao_mapa(tabela: pd.DataFrame, ctx: dict[str, Any], estilo: str, mostrar_score: bool) -> None:
     """Mapa + clique + janela de detalhe. Como fragmento, clicar em um marcador não recarrega o resto da página."""
     mapa = criar_mapa(
-        tabela_vis,
+        tabela,
         estilo,
         ctx["cores"],
         mostrar_score,
         ctx["rotulo_hora"],
         ctx["fonte"],
-        ctx["raios"],
-        ctx["raio_km"],
+        ctx["divisas"],
+        ctx["goes"],
+        ctx["goes_opacidade"],
     )
     resultado_mapa = st_folium(
         mapa,
-        height=altura,
+        height=ALTURA_MAPA,
         use_container_width=True,
         key=f"mapa_{ctx['modelo_id']}_{estilo}_{st.session_state['versao_mapa']}",
         returned_objects=["last_object_clicked_tooltip"],
     )
 
     clique = resultado_mapa.get("last_object_clicked_tooltip") if resultado_mapa else None
-    if clique and clique in set(tabela_vis["Unidade"]) and clique != st.session_state["ultimo_clique_mapa"]:
+    if clique and clique in set(tabela["Unidade"]) and clique != st.session_state["ultimo_clique_mapa"]:
         st.session_state["ultimo_clique_mapa"] = clique
         selecionar_estacao(clique)
 
@@ -821,19 +896,6 @@ def main() -> None:
             )
             nome_modelo, origem, frequencia = MODELOS[modelo_id]
             st.caption(f"Origem: {origem} · Atualiza: {frequencia}")
-            usar_consenso = st.toggle(
-                "Consenso entre modelos",
-                help="O score do mapa passa a ser a média do score calculado em cada modelo escolhido.",
-            )
-            modelos_consenso: list[str] = []
-            if usar_consenso:
-                modelos_consenso = st.multiselect(
-                    "Modelos do consenso",
-                    options=list(MODELOS),
-                    default=CONSENSO_PADRAO,
-                    format_func=lambda chave: MODELOS[chave][0],
-                    max_selections=5,
-                )
             if st.button("Atualizar dados de todos os modelos", width="stretch"):
                 limpar_cache_dados()
                 st.session_state["ultimo_clique_mapa"] = None
@@ -841,26 +903,39 @@ def main() -> None:
 
         with st.expander("Mapa"):
             estilo = st.selectbox("Estilo do mapa", options=list(TILES), index=0)
-            daltonismo = st.toggle("Paleta para daltonismo", help="Azul → amarelo → laranja → vinho, variando também a luminosidade.")
             mostrar_score = st.toggle("Mostrar o score dentro das bolinhas", value=True)
-            altura = st.slider("Altura do mapa (px)", 420, 900, 680, step=20)
+            divisas = st.toggle("Divisas estaduais", value=True)
+            goes = st.toggle("Topos de nuvem (GOES-East)", help="Infravermelho do GOES-East (NASA GIBS), atualizado a cada ~10 min com atraso de cerca de 30 min. Requer internet no navegador.")
+            goes_opacidade = st.slider("Opacidade das nuvens", 0.2, 0.9, 0.6, step=0.05) if goes else 0.6
 
         with st.expander("Calibração da heurística"):
-            st.caption("1,0 = regra original. Ajuste a sensibilidade e compare com as observações.")
+            st.caption("1,0 = regra original. Ajuste a sensibilidade da heurística.")
             st.slider("Sensibilidade ao CAPE (×)", 0.5, 2.0, step=0.05, key="fator_cape")
             st.slider("Sensibilidade ao Lifted Index (×)", 0.5, 2.0, step=0.05, key="fator_li")
             st.slider("Peso do CIN (×)", 0.0, 2.0, step=0.05, key="peso_cin")
+            st.toggle(
+                "Heurística ampliada",
+                key="ampliada",
+                help="Soma ao score pontos por precipitação, rajada, gradiente de temperatura 850–500 hPa e nível de 0 °C. "
+                     "Ainda não calibrada com observações: use com cautela e compare com o histórico.",
+            )
+            if st.session_state["ampliada"]:
+                st.slider("Peso das variáveis extras (×)", 0.25, 2.0, step=0.05, key="peso_extras")
+            with st.expander("Ajuste por região (UF)"):
+                st.caption("Multiplica o CAPE e o LI da UF antes de calcular o score (1,0 = sem ajuste). Valores iniciais: config_regioes.json.")
+                editado = st.data_editor(
+                    _tabela_regioes_inicial(),
+                    key=f"regioes_{st.session_state['regioes_v']}",
+                    hide_index=True,
+                    width="stretch",
+                    height=300,
+                    disabled=["UF"],
+                    column_config={
+                        "CAPE (×)": st.column_config.NumberColumn(min_value=0.25, max_value=3.0, step=0.05, format="%.2f"),
+                        "LI (×)": st.column_config.NumberColumn(min_value=0.25, max_value=3.0, step=0.05, format="%.2f"),
+                    },
+                )
             st.button("Restaurar padrão", on_click=_restaurar_calibracao, width="stretch")
-
-        with st.expander("Raios observados (opcional)"):
-            st.caption("CSV com colunas lat e lon (e, opcionalmente, tempo), por exemplo exportado do GLM/GOES.")
-            arquivo_raios = st.file_uploader("Arquivo de raios", type=["csv", "txt"], label_visibility="collapsed")
-            raio_km = float(st.slider("Raio ao redor de cada unidade (km)", 5, 100, 25, step=5))
-            limitar_janela = st.toggle("Usar só as últimas horas do arquivo")
-            janela_h = float(st.number_input("Últimas horas", min_value=1, max_value=72, value=3)) if limitar_janela else None
-
-        with st.expander("Filtros"):
-            ufs_selecionadas = st.multiselect("Unidade da federação", options=UFS, placeholder="Todas")
 
     if modelo_id != st.session_state["modelo_anterior"]:
         st.session_state["modelo_anterior"] = modelo_id
@@ -868,10 +943,14 @@ def main() -> None:
         st.session_state["abrir_popup"] = False
         recriar_mapa()
 
-    paleta = "daltonismo" if daltonismo else "padrao"
-    cores = cores_da_paleta(paleta)
-    icones = ICONES[paleta]
-    parametros = ParametrosRisco(st.session_state["fator_cape"], st.session_state["fator_li"], st.session_state["peso_cin"])
+    cores = CORES_NIVEL
+    regioes = _regioes_do_editor(editado)
+    parametros = ParametrosRisco(
+        st.session_state["fator_cape"],
+        st.session_state["fator_li"],
+        st.session_state["peso_cin"],
+        st.session_state["peso_extras"] if st.session_state["ampliada"] else 0.0,
+    )
 
     # ------------------------------------------------------------------ dados
     try:
@@ -885,40 +964,28 @@ def main() -> None:
         st.stop()
     if aviso:
         st.warning(aviso)
+    elif historico.caminho_do_historico() is not None:
+        try:  # o histórico nunca pode derrubar o painel
+            historico.registrar(dados, modelo_id)
+        except Exception as erro:
+            st.sidebar.caption(f"Histórico indisponível: {erro}")
+    ampliada_ativa = bool(st.session_state["ampliada"] and dados.get("_extras"))
+    if st.session_state["ampliada"] and not dados.get("_extras"):
+        st.sidebar.warning(
+            "A API não devolveu as variáveis extras para este modelo "
+            f"({dados.get('_erro_extras') or 'sem detalhe'}); usando a heurística básica."
+        )
+        parametros = ParametrosRisco(parametros.fator_cape, parametros.fator_li, parametros.peso_cin, 0.0)
 
-    dados_consenso: Optional[dict[str, dict[str, Any]]] = None
-    if usar_consenso:
-        if len(modelos_consenso) < 2:
-            st.sidebar.info("Escolha ao menos 2 modelos para o consenso; usando só o modelo selecionado.")
-        else:
-            with st.spinner(f"Buscando {len(modelos_consenso)} modelos para o consenso..."):
-                brutos = _buscar_varios_cache(tuple(sorted(modelos_consenso)), CACHE_HORARIO_LOCAL)
-            validos = {m: d for m, d in brutos.items() if "_erro" not in d}
-            falhos = [MODELOS[m][0] for m, d in brutos.items() if "_erro" in d]
-            if falhos:
-                st.sidebar.warning("Sem dados de: " + ", ".join(falhos))
-            if len(validos) >= 2:
-                dados_consenso = validos
-            else:
-                st.sidebar.warning("Menos de 2 modelos disponíveis; usando só o modelo selecionado.")
-
-    raios: Optional[pd.DataFrame] = None
-    if arquivo_raios is not None:
-        try:
-            raios = filtrar_janela(_ler_raios_cache(arquivo_raios.getvalue()), janela_h)
-        except Exception as erro:  # arquivo malformado: informa e segue sem a camada
-            st.sidebar.error(f"Não foi possível ler o arquivo de raios: {erro}")
-
-    fonte = f"consenso de {len(dados_consenso)} modelos" if dados_consenso else nome_modelo
+    fonte = nome_modelo
 
     # ------------------------------------------------------------------ áreas da página (ordem visual)
     area_cabecalho = st.container()
     area_kpi = st.container()
     area_hora = st.container()
-    area_filtro = st.container()
     area_destaque = st.container()
 
-    limite_h = min([HORIZONTE_MAX_H, horas_a_frente(dados)] + [horas_a_frente(d) for d in (dados_consenso or {}).values()])
+    limite_h = min(HORIZONTE_MAX_H, horas_a_frente(dados))
     with area_hora:
         if limite_h > 0:
             st.session_state["deslocamento"] = min(st.session_state.get("deslocamento", 0), limite_h)
@@ -934,57 +1001,42 @@ def main() -> None:
     rotulo_hora = rotulo_horario(dados, deslocamento)
 
     # ------------------------------------------------------------------ cálculo
-    series = series_por_unidade(dados, parametros, dados_consenso)
+    series = series_por_unidade(dados, parametros, regioes)
     tabela = consolidar(dados, series, deslocamento)
-    if raios is not None:
-        tabela["Raios obs."] = contar_raios(tabela, raios, raio_km)
-    tabela_uf = tabela[tabela["UF"].isin(ufs_selecionadas)] if ufs_selecionadas else tabela
-    contagens = tabela_uf["Risco"].value_counts()
-
-    with area_filtro:
-        niveis = list(reversed(ROTULOS))
-        escolhidos = st.pills(
-            "Filtrar por nível de risco",
-            niveis,
-            selection_mode="multi",
-            format_func=lambda nivel: f"{icones[nivel]} {nivel} ({int(contagens.get(nivel, 0))})",
-            label_visibility="collapsed",
-            key="filtro_niveis",
-        )
-    tabela_vis = tabela_uf[tabela_uf["Risco"].isin(escolhidos)] if escolhidos else tabela_uf
+    niveis = list(reversed(ROTULOS))
+    contagens = tabela["Risco"].value_counts()
 
     ctx = {
         "dados": dados,
         "series": series,
-        "dados_consenso": dados_consenso or {},
         "tabela": tabela,
         "cores": cores,
         "deslocamento": deslocamento,
         "rotulo_hora": rotulo_hora,
         "modelo_id": modelo_id,
         "fonte": fonte,
-        "raios": raios,
-        "raio_km": raio_km,
+        "divisas": divisas,
+        "goes": goes,
+        "goes_opacidade": goes_opacidade,
+        "ampliada": ampliada_ativa,
     }
 
     # ------------------------------------------------------------------ barra lateral (lista de unidades)
     with st.sidebar:
         st.divider()
-        st.caption(f"UNIDADES ({len(tabela_vis)} de {len(ESTACOES)})")
+        st.caption(f"UNIDADES ({len(ESTACOES)})")
         termo = st.text_input("Pesquisar unidade", placeholder="Pesquisar unidade...", label_visibility="collapsed")
-        ordem = st.radio("Ordenar por", ["Nome", "Maior risco", "Vai piorar"], horizontal=True, label_visibility="collapsed")
-        lista = tabela_vis[tabela_vis["Unidade"].str.casefold().str.contains(termo.casefold().strip(), na=False, regex=False)]
+        ordem = st.radio("Ordenar por", ["Nome", "Maior risco"], horizontal=True, label_visibility="collapsed")
+        lista = tabela[tabela["Unidade"].str.casefold().str.contains(termo.casefold().strip(), na=False, regex=False)]
         if ordem == "Maior risco":
             lista = lista.sort_values(["Score", "Unidade"], ascending=[False, True], na_position="last", kind="stable")
-        elif ordem == "Vai piorar":
-            lista = lista.sort_values(["Δ 6 h", "Score", "Unidade"], ascending=[False, False, True], na_position="last", kind="stable")
         if lista.empty:
             st.caption("Nenhuma unidade encontrada.")
         for _, linha in lista.iterrows():
             score_txt = "—" if pd.isna(linha["Score"]) else f"{linha['Score']:.0f}"
             seta = f" {linha['Tendência']}" if linha["Tendência"] else ""
             if st.button(
-                f"{icones.get(linha['Risco'], '⚫')} {score_txt}{seta} · {linha['Unidade']}",
+                f"{ICONES.get(linha['Risco'], '⚫')} {score_txt}{seta} · {linha['Unidade']}",
                 key=f"unidade_{linha['Unidade']}",
                 width="stretch",
                 help=f"{linha['Risco']} — abrir previsão horária",
@@ -995,7 +1047,7 @@ def main() -> None:
     minutos = _minutos_desde(dados)
     sufixo_hora = " · agora" if deslocamento == 0 else f" · +{deslocamento} h"
     pilulas = [
-        f"<span class='pill'>Score · <b>{escape(fonte)}</b></span>",
+        f"<span class='pill'>Modelo · <b>{escape(fonte)}</b></span>",
         f"<span class='pill'>Hora exibida · <b>{escape(rotulo_hora)}{sufixo_hora}</b></span>",
     ]
     if minutos is not None:
@@ -1017,7 +1069,7 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
 
-    com_score = tabela_uf.dropna(subset=["Score"])
+    com_score = tabela.dropna(subset=["Score"])
     with area_destaque:
         if com_score.empty:
             texto, cor_destaque = "Sem dados de risco disponíveis para o modelo selecionado.", cores["Sem dados"]
@@ -1042,24 +1094,22 @@ def main() -> None:
         st.markdown("<div class='secao'>Mapa de unidades monitoradas</div>", unsafe_allow_html=True)
 
     # ------------------------------------------------------------------ mapa (fragmento)
-    secao_mapa(tabela_vis, ctx, estilo, mostrar_score, altura)
+    secao_mapa(tabela, ctx, estilo, mostrar_score)
 
     # ------------------------------------------------------------------ tabela e exportação
     with st.expander("Tabela e exportação"):
         aba_tabela, aba_exportar = st.tabs(["Tabela", "Exportar"])
         with aba_tabela:
             st.markdown(
-                f"<div class='nota-tab'>Leitura em {escape(rotulo_hora)} · score: {escape(fonte)}. "
+                f"<div class='nota-tab'>Leitura em {escape(rotulo_hora)} · modelo: {escape(fonte)}. "
                 "Δ 6 h = maior variação do score nas próximas 6 h.</div>",
                 unsafe_allow_html=True,
             )
             colunas = ["Unidade", "UF", "Risco", "Score", "Tendência", "Δ 6 h", "Pico 24 h", "Hora do pico",
                        "CAPE (J/kg)", "Lifted Index (°C)", "CIN (J/kg)"]
-            if dados_consenso:
-                colunas += ["Score mín.", "Score máx.", "Modelos"]
-            if raios is not None:
-                colunas += ["Raios obs."]
-            exibicao = tabela_vis[colunas].sort_values("Score", ascending=False, na_position="last")
+            if ampliada_ativa:
+                colunas += ["Precip. (mm/h)", "Rajada (km/h)", "Gradiente 850–500 (°C)", "Nível 0 °C (m)"]
+            exibicao = tabela[colunas].sort_values("Score", ascending=False, na_position="last")
 
             def colorir_risco(valor: str) -> str:
                 cor = cores.get(valor, cores["Sem dados"])
@@ -1077,8 +1127,10 @@ def main() -> None:
                     "CAPE (J/kg)": st.column_config.NumberColumn(format="%.0f"),
                     "Lifted Index (°C)": st.column_config.NumberColumn(format="%.1f"),
                     "CIN (J/kg)": st.column_config.NumberColumn(format="%.0f"),
-                    "Score mín.": st.column_config.NumberColumn(format="%.0f"),
-                    "Score máx.": st.column_config.NumberColumn(format="%.0f"),
+                    "Precip. (mm/h)": st.column_config.NumberColumn(format="%.1f"),
+                    "Rajada (km/h)": st.column_config.NumberColumn(format="%.0f"),
+                    "Gradiente 850–500 (°C)": st.column_config.NumberColumn(format="%.1f"),
+                    "Nível 0 °C (m)": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
         with aba_exportar:
@@ -1086,7 +1138,7 @@ def main() -> None:
             c1, c2 = st.columns(2)
             c1.download_button(
                 "Baixar tabela atual (CSV)",
-                _csv_br(tabela.drop(columns=["Latitude", "Longitude"]).assign(**{"Horário": rotulo_hora, "Fonte do score": fonte})),
+                _csv_br(tabela.drop(columns=["Latitude", "Longitude"]).assign(**{"Horário": rotulo_hora, "Modelo": fonte})),
                 file_name=f"rusbe_tabela_{carimbo}.csv",
                 mime="text/csv",
                 on_click="ignore",
@@ -1104,11 +1156,11 @@ def main() -> None:
             st.markdown("<div class='rodape-sec'>Mapa estático e relatório (mapa + ranking de todas as unidades):</div>", unsafe_allow_html=True)
             if st.button("Gerar mapa PNG e relatório PDF", width="stretch"):
                 titulo = "RUSBÉ — Risco de raios"
-                subtitulo = f"{rotulo_hora} · score: {fonte} · gerado em {datetime.now(TZ_BRASILIA):%d/%m/%Y %H:%M}"
+                subtitulo = f"{rotulo_hora} · modelo: {fonte} · gerado em {datetime.now(TZ_BRASILIA):%d/%m/%Y %H:%M}"
                 with st.spinner("Gerando arquivos..."):
                     st.session_state["relatorio"] = {
-                        "png": gerar_png(tabela, titulo, subtitulo, paleta),
-                        "pdf": gerar_pdf(tabela, titulo, subtitulo, paleta),
+                        "png": gerar_png(tabela, titulo, subtitulo),
+                        "pdf": gerar_pdf(tabela, titulo, subtitulo),
                         "descricao": subtitulo,
                         "carimbo": carimbo,
                     }
@@ -1121,12 +1173,15 @@ def main() -> None:
                 d2.download_button("Baixar relatório (PDF)", relatorio["pdf"], file_name=f"rusbe_relatorio_{relatorio['carimbo']}.pdf",
                                    mime="application/pdf", on_click="ignore", width="stretch")
 
+    with st.expander("Histórico das previsões"):
+        painel_historico(modelo_id, parametros, regioes, [e["nome"] for e in ESTACOES], cores)
+
     with st.expander("Como interpretar o painel"):
         st.write(
             "O score é uma heurística baseada em CAPE, Lifted Index e CIN. CAPE alto e Lifted Index mais negativo "
-            "elevam o risco; CIN elevado reduz a probabilidade de disparo convectivo. A seta indica a tendência do score "
-            "nas próximas 6 h (▲ sobe, ▼ desce, ▬ estável). No modo consenso, o score é a média dos modelos escolhidos e a "
-            "faixa mín.–máx. mostra a divergência entre eles. O painel serve ao acompanhamento meteorológico e não substitui "
+            "elevam o risco; CIN elevado reduz a probabilidade de disparo convectivo. Com a heurística ampliada ligada, precipitação, "
+            "rajada, gradiente 850–500 hPa e nível de 0 °C somam pontos (limitados e ainda não calibrados com observações). A seta indica a tendência do score "
+            "nas próximas 6 h (▲ sobe, ▼ desce, ▬ estável). O painel serve ao acompanhamento meteorológico e não substitui "
             "alertas oficiais ou sistemas de detecção de descargas atmosféricas."
         )
         st.caption(f"Última renderização local: {datetime.now(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S')} (America/Sao_Paulo).")

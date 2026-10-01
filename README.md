@@ -8,16 +8,17 @@ Versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaçãodeSistem
 
 | Área | O que faz |
 |---|---|
-| **Mapa** | OpenStreetMap (padrão) ou Satélite, travado no Brasil (contorno + véu no entorno), botão ⌂ para recentralizar. Bolinhas de tamanho fixo (inclusive durante o zoom) com o score escrito dentro; a de maior risco fica por cima. A posição e o zoom são preservados ao fechar o painel. |
+| **Mapa** | OpenStreetMap (padrão) ou Satélite, travado no Brasil (contorno + véu no entorno), botão ⌂ para recentralizar. Bolinhas de tamanho fixo (inclusive durante o zoom) com o score escrito dentro (opcional); a de maior risco fica por cima. A posição e o zoom são preservados ao fechar o painel. |
 | **Hora da previsão** | Controle deslizante de +0 h a +48 h: o mapa, os cartões e a tabela passam a mostrar a hora escolhida. |
-| **Tendência** | Seta ▲ ▼ ▬ por unidade (variação do score nas próximas 6 h), pico das próximas 24 h e horário do pico. A lista lateral pode ser ordenada por *Nome*, *Maior risco* ou *Vai piorar*. |
-| **Detalhe da unidade** | Cartões (risco, CAPE, LI, CIN, tendência, consenso, raios), gráfico de 48 h do score sobre as faixas de risco, gráficos de CAPE/LI/CIN e tabela horária. |
-| **Filtros** | Por nível de risco (botões com contagem), por UF e por nome. |
-| **Consenso entre modelos** | Média do score calculado em 2 a 5 modelos (padrão: ECMWF IFS, GFS, ICON), com faixa mín.–máx. e uma linha por modelo no gráfico. |
+| **Tendência** | Seta ▲ ▼ ▬ por unidade (variação do score nas próximas 6 h), pico das próximas 24 h e horário do pico. A lista lateral pode ser ordenada por *Nome* ou *Maior risco*. |
+| **Detalhe da unidade** | Cartões (risco, CAPE, LI, CIN, tendência), gráfico de 48 h do score sobre as faixas de risco, gráficos de CAPE/LI/CIN e tabela horária. |
 | **Calibração** | Sensibilidade ao CAPE, sensibilidade ao Lifted Index e peso do CIN (1,0 = regra original). |
-| **Raios observados** | Carregue um CSV (`lat`, `lon` e, opcionalmente, `tempo`; por exemplo exportado do GLM/GOES) para ver os raios no mapa e a contagem em torno de cada unidade (raio de 5 a 100 km). |
+| **Heurística ampliada** | Opcional (desligada por padrão). Soma ao score pontos por precipitação, rajada, gradiente de temperatura 850–500 hPa e nível de 0 °C, limitados a −4/+20 pontos e multiplicados por um peso ajustável. **Ainda não calibrada com observações.** Se a API não devolver essas variáveis, o painel avisa e segue com a heurística básica. |
+| **Ajuste por região** | Fatores de CAPE e de LI por UF (tabela editável no painel; valores iniciais em `config_regioes.json`, todos 1,0). |
+| **Camadas do mapa** | Divisas estaduais (ligadas por padrão) e topos de nuvem do GOES-East, infravermelho banda 13, via NASA GIBS (opcional, com controle de opacidade). |
+| **Histórico** | Grava em SQLite, uma vez por hora e por modelo, CAPE, LI, CIN e variáveis extras das próximas 48 h. O painel mostra o score realizado, como a previsão para um horário mudou entre execuções e exporta CSV com score recalculado. |
 | **Exportação** | Tabela atual e séries horárias de 48 h em CSV (abre no Excel em português); mapa estático em PNG e relatório em PDF (mapa + ranking). |
-| **Acessibilidade** | Paleta para daltonismo, score dentro da bolinha, altura do mapa ajustável, barra lateral recolhida em telas pequenas. |
+| **Acessibilidade** | Score escrito dentro da bolinha e barra lateral recolhida em telas pequenas. |
 | **Robustez** | 3 tentativas com espera crescente na API; se ela falhar, usa o último dado válido e avisa quantos minutos ele tem. Indicador "Dados · há N min" no cabeçalho. |
 | **Alertas** | `alertas.py` envia e-mail e/ou webhook (Teams, Slack, Discord, gateway de WhatsApp) quando uma unidade atinge, ou deve atingir em poucas horas, o nível configurado. |
 
@@ -26,13 +27,16 @@ Versão em **Streamlit** do notebook `RUSBÉ—RastreamentoeUtilizaçãodeSistem
 | Arquivo | Finalidade |
 |---|---|
 | `app.py` | Interface Streamlit. |
-| `analise.py` | Séries de score, tendência, consenso e contagem de raios (sem dependência do Streamlit). |
-| `risco_raio.py` | Heurística de risco, parâmetros de calibração e paletas. |
+| `analise.py` | Séries de score, tendência, extras e fatores por UF (sem dependência do Streamlit). |
+| `historico.py` | Histórico das previsões em SQLite (módulo e linha de comando). |
+| `app_camadas.py` | Endereço e atribuição da camada GOES. |
+| `config_regioes.json` | Fatores de CAPE e LI por UF (neutros por padrão). |
+| `risco_raio.py` | Heurística de risco, parâmetros de calibração e cores dos níveis. |
 | `modelos.py` | Consulta dos modelos (com tentativas) e normalização da resposta. |
 | `unidades.py` | As 40 unidades, coordenadas e UF. |
 | `relatorio.py` | Geração do mapa PNG e do relatório PDF. |
 | `alertas.py` | Verificação e envio de alertas (linha de comando). |
-| `dados/` | Contorno e máscara simplificados do Brasil (Natural Earth, domínio público). |
+| `dados/` | Contorno, máscara e divisas estaduais simplificados (Natural Earth, domínio público). |
 | `.streamlit/config.toml` | Tema escuro fixo. |
 | `.github/workflows/alertas.yml` | Agendamento dos alertas a cada 30 min. |
 | `validar.py` | Testes (offline por padrão; `--online` consulta a API). |
@@ -47,16 +51,32 @@ streamlit run app.py
 A aplicação abre normalmente em `http://localhost:8501`. Para validar:
 
 ```bash
-python validar.py            # testes offline
-python validar.py --online   # inclui a consulta real à API
+python validar.py                    # testes offline
+python validar.py --online           # relatório de sanidade com dados reais (cobertura, faixas, horizonte, extras, GOES)
+python validar.py --online --modelos # idem para os 12 modelos: mostra quais devolvem CAPE, LI e CIN
 ```
+
+## Histórico
+
+O painel grava automaticamente uma execução por modelo e por hora cheia quando os dados são buscados com sucesso. O arquivo fica em `historico/rusbe.sqlite` (mude com a variável `RUSBE_HISTORICO`; use `desligado` para não gravar).
+
+```bash
+python historico.py registrar                      # busca o modelo e grava (agende a cada hora)
+python historico.py status
+python historico.py exportar --saida historico.csv --dias 30
+python historico.py limpar --manter-dias 90
+```
+
+> No Streamlit Community Cloud o disco é apagado quando o app reinicia, então o histórico lá não é permanente. Para um histórico de verdade, agende `python historico.py registrar` em uma máquina sua (cron/Agendador de Tarefas) ou use um volume persistente.
+
+O histórico guarda as variáveis **brutas** (não o score), então dá para recalcular o score com outra calibração e compará-lo depois com observações.
 
 ## Alertas
 
 ```bash
 python alertas.py --dry-run                                  # só imprime
 python alertas.py --nivel Alto --antecedencia 3              # avisa em Alto+ ou previsto em até 3 h
-python alertas.py --consenso ecmwf_ifs025 gfs_seamless icon_seamless
+python alertas.py --heuristica-ampliada                      # inclui precipitação, rajada etc. no score
 ```
 
 Cada unidade é avisada **uma vez**; ela só é avisada de novo depois de voltar a ficar abaixo do nível. O estado fica em `estado_alertas.json`. Os canais são configurados por variáveis de ambiente (nenhuma é obrigatória, mas sem elas o script apenas imprime):
@@ -69,19 +89,10 @@ Cada unidade é avisada **uma vez**; ela só é avisada de novo depois de voltar
 
 Para rodar a cada 30 minutos sem servidor próprio, use o workflow `.github/workflows/alertas.yml` (cadastre as variáveis como *secrets* do repositório). O GitHub pode atrasar execuções agendadas em alguns minutos.
 
-## Formato do CSV de raios
-
-```csv
-lat,lon,tempo
--22.71,-43.28,2026-09-30T21:05:00Z
-```
-
-Aceita também `latitude`/`longitude` e `datetime`/`timestamp`/`data_hora`. O separador (`,` ou `;`) é detectado automaticamente. Com a coluna de tempo, é possível limitar às últimas horas do arquivo.
-
 ## Publicação no Streamlit Community Cloud
 
 Envie esta pasta para um repositório GitHub. Na criação do aplicativo no [Streamlit Community Cloud](https://share.streamlit.io/), indique o repositório, a branch e o arquivo principal `app.py`. As dependências são instaladas a partir de `requirements.txt`.
 
 ## Fonte de dados
 
-Previsões da API [Open-Meteo](https://open-meteo.com/), com as variáveis horárias `cape`, `lifted_index` e `convective_inhibition` (3 dias a partir de 00:00 de hoje).
+Previsões da API [Open-Meteo](https://open-meteo.com/), com as variáveis horárias `cape`, `lifted_index` e `convective_inhibition` (3 dias a partir de 00:00 de hoje) e, para a heurística ampliada, `precipitation`, `wind_gusts_10m`, `freezing_level_height`, `temperature_850hPa` e `temperature_500hPa`. Imagem de satélite: GOES-East via [NASA GIBS](https://nasa-gibs.github.io/gibs-api-docs/). Confira os termos de uso da Open-Meteo para o seu caso (o plano gratuito é voltado a uso não comercial).

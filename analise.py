@@ -1,21 +1,23 @@
 """Análise dos dados do RUSBÉ (sem dependência do Streamlit).
 
-Concentra o cálculo de séries de score, tendência, consenso entre modelos e
-contagem de raios observados, para ser reutilizado pelo app, pelos alertas e
+Concentra o cálculo das séries de score (com heurística ampliada e ajuste por UF)
+e da tendência, para ser reutilizado pelo app, pelos alertas, pelo histórico e
 pelo relatório.
 """
 
 from __future__ import annotations
 
-import math
-from typing import Any, Iterable, Optional
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from modelos import horario_local
 from risco_raio import PARAMETROS_PADRAO, ParametrosRisco, calcular_risco, classificar_risco
-from unidades import ESTACOES
+from unidades import ESTACOES, UFS
 
 JANELA_TENDENCIA_H = 6  # horas à frente usadas para decidir ▲ / ▼
 LIMIAR_TENDENCIA = 10.0  # variação mínima de score para indicar subida/descida
@@ -28,13 +30,63 @@ def _valor(serie: list[Optional[float]], indice: int) -> Optional[float]:
     return serie[indice] if 0 <= indice < len(serie) else None
 
 
+ARQUIVO_REGIOES = Path(__file__).resolve().parent / "config_regioes.json"
+FATORES_NEUTROS = (1.0, 1.0)  # (fator_cape, fator_li) de uma UF sem ajuste
+
+
+def carregar_regioes(caminho: Path = ARQUIVO_REGIOES) -> dict[str, tuple[float, float]]:
+    """Fatores (CAPE, LI) por UF a partir de ``config_regioes.json``; UFs ausentes ficam neutras (1,0)."""
+    fatores = {uf: FATORES_NEUTROS for uf in UFS}
+    try:
+        bruto = json.loads(Path(caminho).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fatores
+    for uf, valores in bruto.items():
+        if uf in fatores and isinstance(valores, dict):
+            try:
+                fatores[uf] = (float(valores.get("fator_cape", 1.0)), float(valores.get("fator_li", 1.0)))
+            except (TypeError, ValueError):
+                pass
+    return fatores
+
+
+def extras_na_hora(serie: dict[str, Any], indice: int) -> Optional[dict[str, Optional[float]]]:
+    """Variáveis da heurística ampliada na hora ``indice`` (índice absoluto da série), ou ``None`` se não há extras."""
+    if not any(campo in serie for campo in ("precip", "rajada", "nivel0", "t850", "t500")):
+        return None
+    t850, t500 = _valor(serie.get("t850", []), indice), _valor(serie.get("t500", []), indice)
+    return {
+        "precip": _valor(serie.get("precip", []), indice),
+        "rajada": _valor(serie.get("rajada", []), indice),
+        "nivel0": _valor(serie.get("nivel0", []), indice),
+        "gradiente": (t850 - t500) if t850 is not None and t500 is not None else None,
+    }
+
+
+def parametros_da_unidade(
+    parametros: ParametrosRisco, uf: str, regioes: Optional[dict[str, tuple[float, float]]] = None
+) -> ParametrosRisco:
+    """Aplica os fatores regionais (CAPE e LI) sobre os parâmetros globais."""
+    fator_cape, fator_li = (regioes or {}).get(uf, FATORES_NEUTROS)
+    if (fator_cape, fator_li) == FATORES_NEUTROS:
+        return parametros
+    return replace(parametros, fator_cape=parametros.fator_cape * fator_cape, fator_li=parametros.fator_li * fator_li)
+
+
 def scores_relativos(serie: dict[str, Any], parametros: ParametrosRisco = PARAMETROS_PADRAO) -> list[Optional[float]]:
     """Scores horários a partir da hora atual: posição 0 = agora, 1 = +1 h, …"""
     inicio = serie.get("idx_atual", 0)
     n = len(serie.get("tempos", []))
     capes, lis, cins = serie.get("cape", []), serie.get("li", []), serie.get("cin", [])
+    usa_extras = parametros.peso_extras > 0
     return [
-        calcular_risco(_valor(capes, i), _valor(lis, i), _valor(cins, i), parametros)[0]
+        calcular_risco(
+            _valor(capes, i),
+            _valor(lis, i),
+            _valor(cins, i),
+            parametros,
+            extras_na_hora(serie, i) if usa_extras else None,
+        )[0]
         for i in range(inicio, n)
     ]
 
@@ -66,29 +118,17 @@ def rotulo_horario(dados: dict[str, Any], deslocamento: int) -> str:
 def series_por_unidade(
     dados: dict[str, Any],
     parametros: ParametrosRisco = PARAMETROS_PADRAO,
-    dados_consenso: Optional[dict[str, dict[str, Any]]] = None,
+    regioes: Optional[dict[str, tuple[float, float]]] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Séries de score por unidade.
-
-    Retorna, por unidade: ``rel`` (série usada no mapa — o modelo selecionado ou a
-    média do consenso) e ``por_modelo`` (série de cada modelo do consenso).
-    """
-    resultado: dict[str, dict[str, Any]] = {}
-    for estacao in ESTACOES:
-        nome = estacao["nome"]
-        if dados_consenso:
-            por_modelo = {
-                modelo: scores_relativos(d.get(nome, {}), parametros) for modelo, d in dados_consenso.items()
-            }
-            tamanho = min((len(s) for s in por_modelo.values()), default=0)
-            media: list[Optional[float]] = []
-            for i in range(tamanho):
-                valores = [s[i] for s in por_modelo.values() if s[i] is not None]
-                media.append(round(sum(valores) / len(valores), 1) if valores else None)
-            resultado[nome] = {"rel": media, "por_modelo": por_modelo, "consenso": True}
-        else:
-            resultado[nome] = {"rel": scores_relativos(dados.get(nome, {}), parametros), "por_modelo": {}, "consenso": False}
-    return resultado
+    """Série de score por unidade (``rel``: posição 0 = agora, 1 = +1 h, …), com ajuste por UF."""
+    return {
+        estacao["nome"]: {
+            "rel": scores_relativos(
+                dados.get(estacao["nome"], {}), parametros_da_unidade(parametros, estacao["uf"], regioes)
+            )
+        }
+        for estacao in ESTACOES
+    }
 
 
 def tendencia(rel: list[Optional[float]], deslocamento: int = 0) -> dict[str, Any]:
@@ -136,12 +176,10 @@ def consolidar(
         else:
             nivel = classificar_risco(score)[0]
 
-        por_modelo = [
-            s[deslocamento] for s in info["por_modelo"].values() if 0 <= deslocamento < len(s) and s[deslocamento] is not None
-        ]
         tend = tendencia(rel, deslocamento)
         pico_hora = rotulo_horario({nome: serie}, tend["desloc_pico"]) if tend["desloc_pico"] is not None else "—"
 
+        extras = extras_na_hora(serie, i) or {}
         linhas.append(
             {
                 "Unidade": nome,
@@ -155,66 +193,12 @@ def consolidar(
                 "Δ 6 h": tend["delta6h"],
                 "Pico 24 h": tend["pico"],
                 "Hora do pico": pico_hora,
-                "Score mín.": min(por_modelo) if por_modelo else np.nan,
-                "Score máx.": max(por_modelo) if por_modelo else np.nan,
-                "Modelos": len(por_modelo),
+                "Precip. (mm/h)": extras.get("precip"),
+                "Rajada (km/h)": extras.get("rajada"),
+                "Gradiente 850–500 (°C)": extras.get("gradiente"),
+                "Nível 0 °C (m)": extras.get("nivel0"),
                 "Latitude": estacao["lat"],
                 "Longitude": estacao["lon"],
             }
         )
     return pd.DataFrame(linhas).sort_values("Unidade", kind="stable").reset_index(drop=True)
-
-
-# ----------------------------------------------------------------------------
-# Raios observados (arquivo opcional, por exemplo exportado do GLM/GOES)
-# ----------------------------------------------------------------------------
-_NOMES_LAT = ("lat", "latitude", "lat_deg", "event_lat", "flash_lat")
-_NOMES_LON = ("lon", "lng", "long", "longitude", "lon_deg", "event_lon", "flash_lon")
-_NOMES_TEMPO = ("time", "datetime", "timestamp", "data_hora", "datahora", "data", "flash_time_offset_of_first_event", "t")
-
-
-def ler_raios(origem: Any) -> pd.DataFrame:
-    """Lê um CSV de raios e devolve colunas ``lat``, ``lon`` e (se existir) ``tempo``."""
-    bruto = pd.read_csv(origem, sep=None, engine="python")
-    minusculas = {c: str(c).strip().lower() for c in bruto.columns}
-
-    def achar(nomes: Iterable[str]) -> Optional[str]:
-        for coluna, nome in minusculas.items():
-            if nome in nomes:
-                return coluna
-        return None
-
-    c_lat, c_lon, c_tempo = achar(_NOMES_LAT), achar(_NOMES_LON), achar(_NOMES_TEMPO)
-    if c_lat is None or c_lon is None:
-        raise ValueError("O arquivo precisa ter colunas de latitude e longitude (ex.: lat, lon).")
-
-    saida = pd.DataFrame(
-        {"lat": pd.to_numeric(bruto[c_lat], errors="coerce"), "lon": pd.to_numeric(bruto[c_lon], errors="coerce")}
-    )
-    if c_tempo is not None:
-        saida["tempo"] = pd.to_datetime(bruto[c_tempo], errors="coerce", utc=True)
-    saida = saida.dropna(subset=["lat", "lon"])
-    return saida[(saida["lat"].between(-90, 90)) & (saida["lon"].between(-180, 180))].reset_index(drop=True)
-
-
-def filtrar_janela(raios: pd.DataFrame, ultimas_horas: Optional[float]) -> pd.DataFrame:
-    """Mantém só as últimas ``ultimas_horas`` do arquivo (relativas ao raio mais recente)."""
-    if ultimas_horas is None or "tempo" not in raios or raios["tempo"].isna().all():
-        return raios
-    limite = raios["tempo"].max() - pd.Timedelta(hours=ultimas_horas)
-    return raios[raios["tempo"] >= limite].reset_index(drop=True)
-
-
-def contar_raios(tabela: pd.DataFrame, raios: pd.DataFrame, raio_km: float) -> pd.Series:
-    """Quantidade de raios a até ``raio_km`` de cada unidade (distância de haversine)."""
-    if raios.empty:
-        return pd.Series(0, index=tabela.index, dtype=int)
-    lat_r = np.radians(raios["lat"].to_numpy())
-    lon_r = np.radians(raios["lon"].to_numpy())
-    contagens = []
-    for lat, lon in zip(tabela["Latitude"], tabela["Longitude"]):
-        la, lo = math.radians(lat), math.radians(lon)
-        a = np.sin((lat_r - la) / 2) ** 2 + math.cos(la) * np.cos(lat_r) * np.sin((lon_r - lo) / 2) ** 2
-        distancia = 2 * 6371.0088 * np.arcsin(np.sqrt(a))
-        contagens.append(int((distancia <= raio_km).sum()))
-    return pd.Series(contagens, index=tabela.index, dtype=int)

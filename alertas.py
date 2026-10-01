@@ -7,7 +7,7 @@ configurado (ou acima), e rearma quando a unidade volta a ficar abaixo dele.
 Exemplos:
     python alertas.py --dry-run
     python alertas.py --modelo ecmwf_ifs025 --nivel Alto --antecedencia 6
-    python alertas.py --consenso ecmwf_ifs025 gfs_seamless icon_seamless
+    python alertas.py --heuristica-ampliada
 
 Variáveis de ambiente (todas opcionais; sem elas, apenas imprime):
     ALERTA_WEBHOOK_URL                      URL do webhook (recebe JSON {"text": "...", "content": "..."})
@@ -21,7 +21,6 @@ import json
 import os
 import smtplib
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -29,7 +28,7 @@ from typing import Any, Optional
 
 import requests
 
-from analise import consolidar, rotulo_horario, series_por_unidade
+from analise import carregar_regioes, consolidar, rotulo_horario, series_por_unidade
 from modelos import MODELOS, TZ_BRASILIA, buscar_modelo
 from risco_raio import ORDEM, ParametrosRisco
 
@@ -118,25 +117,21 @@ def enviar_email(texto: str, assunto: str) -> None:
         servidor.send_message(msg)
 
 
-def _buscar_varios(modelos: list[str]) -> dict[str, dict[str, Any]]:
-    with ThreadPoolExecutor(max_workers=len(modelos)) as pool:
-        resultados = list(pool.map(buscar_modelo, modelos))
-    return dict(zip(modelos, resultados))
-
-
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--modelo", default="best_match", choices=list(MODELOS), help="modelo principal")
-    ap.add_argument("--consenso", nargs="+", choices=list(MODELOS), help="usar a média destes modelos como score")
     ap.add_argument("--nivel", default="Alto", choices=["Moderado", "Alto", "Severo"], help="nível mínimo para alertar")
     ap.add_argument("--antecedencia", type=int, default=3, help="avisar também quando o nível for previsto em até N horas (0 = desliga)")
     ap.add_argument("--estado", type=Path, default=ESTADO_PADRAO, help="arquivo JSON com o estado anterior")
+    ap.add_argument("--heuristica-ampliada", action="store_true", help="inclui precipitação, rajada, gradiente 850–500 hPa e nível de 0 °C no score")
     ap.add_argument("--dry-run", action="store_true", help="não envia nada; só imprime e não grava o estado")
     args = ap.parse_args(argv)
 
-    dados = buscar_modelo(args.modelo)
-    dados_consenso = _buscar_varios(args.consenso) if args.consenso else None
-    series = series_por_unidade(dados, ParametrosRisco(), dados_consenso)
+    dados = buscar_modelo(args.modelo, extras=args.heuristica_ampliada)
+    ampliada = args.heuristica_ampliada and dados.get("_extras", False)
+    if args.heuristica_ampliada and not ampliada:
+        print("Aviso: variáveis extras indisponíveis; usando a heurística básica.")
+    series = series_por_unidade(dados, ParametrosRisco(peso_extras=1.0 if ampliada else 0.0), carregar_regioes())
     tabela = consolidar(dados, series, 0)
 
     anterior = json.loads(args.estado.read_text(encoding="utf-8")) if args.estado.exists() else {}
