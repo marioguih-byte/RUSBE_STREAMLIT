@@ -68,6 +68,7 @@ def _inicializar_estado() -> None:
         "estacao_popup": None,
         "abrir_popup": False,
         "ultimo_clique_mapa": None,
+        "versao_mapa": 0,
     }
     for chave, valor in valores_iniciais.items():
         st.session_state.setdefault(chave, valor)
@@ -346,6 +347,8 @@ def abrir_detalhamento(nome: str, dados: dict[str, Any], modelo_id: str) -> None
         if st.button("Fechar", type="primary", width="stretch"):
             st.session_state["abrir_popup"] = False
             st.session_state["ultimo_clique_mapa"] = None
+            # Nova chave = componente novo, que esquece o último marcador clicado.
+            st.session_state["versao_mapa"] += 1
             st.rerun()
 
     janela()
@@ -443,6 +446,7 @@ def main() -> None:
         if st.button("Atualizar dados de todos os modelos", width="stretch"):
             carregar_dados.clear()
             st.session_state["ultimo_clique_mapa"] = None
+            st.session_state["versao_mapa"] += 1
 
         st.divider()
         st.caption("ESTILO DO MAPA")
@@ -452,6 +456,7 @@ def main() -> None:
         st.session_state["modelo_anterior"] = modelo_id
         st.session_state["ultimo_clique_mapa"] = None
         st.session_state["abrir_popup"] = False
+        st.session_state["versao_mapa"] += 1
 
     try:
         with st.spinner(f"Buscando {nome_modelo} para {len(ESTACOES)} unidades..."):
@@ -535,7 +540,7 @@ def main() -> None:
         mapa,
         height=680,
         use_container_width=True,
-        key=f"mapa_{modelo_id}_{estilo}",
+        key=f"mapa_{modelo_id}_{estilo}_{st.session_state['versao_mapa']}",
         returned_objects=["last_object_clicked_tooltip"],
     )
 
